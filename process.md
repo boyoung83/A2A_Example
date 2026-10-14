@@ -17,3 +17,4 @@
 | 2026-10-15 | feat: load API key from .env | API 키를 .env(ANTHROPIC_API_KEY=...)에서 읽도록 변경, .env.example 추가, .env는 git 제외. claudeapi.txt는 더 이상 사용 안 함 |
 | 2026-10-15 | feat: add tkinter desktop app | 데스크톱 앱(app.py): 메모 입력·파일/예시 불러오기, 항목별 색상 카드로 보고서 표시, 자동 점검 배너, 복사·파일 열기, 최근 보고서 목록. API 호출은 백그라운드로 실행(화면 멈춤 없음). 실제 API로 메모 01 생성 확인. 테스트 34개 통과 |
 | 2026-10-15 | feat: add priority and detailed sections to report | 보고서 상세화: 한 줄 요약·시간순 경과·주요 수치/대상·연락/요청 현황 추가, Claude가 긴급도(긴급/주의/일반)와 판단 이유를 함께 판단. 새 항목도 원문 대조 점검. 테스트 45개 통과 |
+| 2026-10-15 | test: share one Tk root across app tests | 앱 테스트가 가끔 건너뛰어지던 문제 수정 (Windows에서 Tk를 반복 생성하면 초기화 실패 → 세션당 하나만 생성). 8회 반복 실행 모두 통과 |

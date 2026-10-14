@@ -30,8 +30,9 @@ def test_build_sections_detail_formats():
     assert by_kind["contacts"] == ["설비팀 — 점검 요청 — 결과 미회신"]
 
 
-@pytest.fixture
-def root():
+@pytest.fixture(scope="session")
+def tk_session():
+    # Tk 인터프리터를 테스트마다 새로 만들면 Windows에서 가끔 초기화가 실패한다 → 세션당 하나만 만든다.
     try:
         r = tk.Tk()
     except tk.TclError:
@@ -39,6 +40,14 @@ def root():
     r.withdraw()
     yield r
     r.destroy()
+
+
+@pytest.fixture
+def root(tk_session):
+    window = tk.Toplevel(tk_session)
+    window.withdraw()
+    yield window
+    window.destroy()
 
 
 def make_app(root, tmp_path, client):
