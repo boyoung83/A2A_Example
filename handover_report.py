@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+import threading
+
+from handover.batch import count_by_priority, find_memos, run_batch
 from handover.config import load_api_key
 from handover.files import read_memo_file, save_report
 from handover.llm import ReportError
@@ -54,11 +57,11 @@ def main(argv: list[str] | None = None, client=None) -> int:
         if not args.dir.is_dir():
             print(f"폴더를 찾을 수 없습니다: {args.dir}", file=sys.stderr)
             return 2
-        files = sorted(args.dir.glob("*.txt"))
+        files = find_memos(args.dir)
         if not files:
             print(f"폴더에 .txt 메모가 없습니다: {args.dir}", file=sys.stderr)
             return 2
-        sources = [(f.name, f.stem, f, None) for f in files]
+        source = None
     elif args.file is not None:
         if not args.file.is_file():
             print(f"파일을 찾을 수 없습니다: {args.file}", file=sys.stderr)
@@ -69,12 +72,12 @@ def main(argv: list[str] | None = None, client=None) -> int:
             print(f"파일을 읽지 못했습니다: {args.file} ({e.reason if isinstance(e, UnicodeDecodeError) else e})",
                   file=sys.stderr)
             return 2
-        sources = [(args.file.name, args.file.stem, None, memo)]
+        source = (args.file.name, args.file.stem, memo)
     else:
         print("메모를 붙여넣고 빈 줄에서 Enter를 두 번 누르세요.")
-        sources = [("직접 입력", "입력", None, read_memo_interactive(sys.stdin))]
+        source = ("직접 입력", "입력", read_memo_interactive(sys.stdin))
 
-    if args.dir is None and not sources[0][3].strip():
+    if source is not None and not source[2].strip():
         print("메모가 비어 있습니다.", file=sys.stderr)
         return 2
 
@@ -87,25 +90,41 @@ def main(argv: list[str] | None = None, client=None) -> int:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
 
-    failed = 0
-    for name, stem, path, memo in sources:
-        try:
-            if memo is None:
-                memo = read_memo_file(path)
-            if not memo.strip():
-                print(f"[{name}] 메모가 비어 있습니다.", file=sys.stderr)
-                failed += 1
-                continue
-            process(memo, name, stem, args.out, client)
-        except UnicodeDecodeError:
-            print(f"[{name}] 파일을 읽지 못했습니다 (UTF-8/CP949가 아님)", file=sys.stderr)
-            failed += 1
-        except OSError as e:
-            print(f"[{name}] 파일 처리 실패: {e}", file=sys.stderr)
-            failed += 1
-        except ReportError as e:
-            print(f"[{name}] 보고서 생성 실패: {e}", file=sys.stderr)
-            failed += 1
+    if args.dir is not None:
+        return _run_dir(files, args.out, client)
+
+    name, stem, memo = source
+    try:
+        process(memo, name, stem, args.out, client)
+    except OSError as e:
+        print(f"[{name}] 파일 처리 실패: {e}", file=sys.stderr)
+        return 1
+    except ReportError as e:
+        print(f"[{name}] 보고서 생성 실패: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_dir(files: list[Path], out_dir: Path, client) -> int:
+    lock = threading.Lock()
+    done = 0
+
+    def on_update(item):
+        nonlocal done
+        if item.status == "처리 중":
+            return
+        with lock:
+            done += 1
+            note = f" ({item.message})" if item.message else ""
+            priority = f" [{item.record.report.priority}]" if item.record else ""
+            print(f"[{done}/{len(files)}] {item.path.name} — {item.status}{priority}{note}", flush=True)
+
+    print(f"{len(files)}건 처리 시작 (최대 4건 동시)")
+    items = run_batch(files, client, out_dir, on_update)
+    counts = count_by_priority([i.record for i in items if i.record])
+    failed = sum(1 for i in items if i.status == "실패")
+    print(f"\n결과: 긴급 {counts['긴급']}건 · 주의 {counts['주의']}건 · 일반 {counts['일반']}건 · 실패 {failed}건")
+    print(f"보고서 폴더: {out_dir}")
     return 1 if failed else 0
 
 

@@ -74,4 +74,14 @@ def test_dir_reads_cp949_and_skips_undecodable(tmp_path):
     fake = FakeClient("end_turn", SAMPLE_REPORT)
     assert main(["--dir", str(tmp_path), "--out", str(out_dir)], client=fake) == 1
     assert len(list(out_dir.glob("*.txt"))) == 2
-    assert "라벨 비뚤어짐" in fake.calls[0]["messages"][0]["content"]
+    assert any("라벨 비뚤어짐" in c["messages"][0]["content"] for c in fake.calls)
+
+
+def test_dir_prints_priority_summary(tmp_path, capsys):
+    for n in ("a", "b"):
+        (tmp_path / f"{n}.txt").write_text("메모", encoding="utf-8")
+    fake = FakeClient(results=[("refusal", None), ("end_turn", SAMPLE_REPORT)])
+    assert main(["--dir", str(tmp_path), "--out", str(tmp_path / "r")], client=fake) == 1
+    out = capsys.readouterr().out
+    assert "긴급 0건 · 주의 0건 · 일반 1건 · 실패 1건" in out
+    assert "[1/2]" in out and "[2/2]" in out
