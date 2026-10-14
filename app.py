@@ -12,10 +12,13 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from handover.batch import find_memos, run_batch
 from handover.config import load_api_key
 from handover.files import read_memo_file
 from handover.llm import MODEL, ReportError
-from handover.service import GenerationResult, generate
+from handover.schema import HandoverReport
+from handover.service import generate
+from handover.store import Record, load_records, sort_for_dashboard
 from handover.view import EMPTY, build_sections
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,6 +36,7 @@ PRIMARY_HOVER = "#1D4ED8"
 PRIMARY_SOFT = "#EFF6FF"
 HEADER = "#0F172A"
 HEADER_MUTED = "#94A3B8"
+HEADER_RAISED = "#1E293B"
 
 BANNERS = {  # 종류: (배경, 테두리, 글자, 아이콘)
     "success": ("#ECFDF5", "#A7F3D0", "#047857", "✓"),
@@ -51,6 +55,11 @@ ACCENTS = {
     "unconfirmed": "#D97706",
 }
 UNCONFIRMED_BG = "#FFFBEB"
+PRIORITY_COLORS = {  # 긴급도: (강조색, 옅은 배경)
+    "긴급": ("#DC2626", "#FEF2F2"),
+    "주의": ("#D97706", "#FFFBEB"),
+    "일반": ("#059669", "#F0FDF4"),
+}
 
 _REPORT_NAME = re.compile(r"^인수인계_(?P<stem>.+)_(?P<d>\d{8})_(?P<t>\d{6})(?:_\d+)?$")
 
@@ -63,6 +72,8 @@ class Fonts:
         mono = next((f for f in ("D2Coding", "Consolas", "Menlo") if f in families), "TkFixedFont")
         self.brand = (base, 15, "bold")
         self.title = (base, 12, "bold")
+        self.hero = (base, 13, "bold")
+        self.stat = (base, 22, "bold")
         self.body = (base, 10)
         self.body_bold = (base, 10, "bold")
         self.editor = (base, 11)
@@ -89,7 +100,7 @@ class Button(tk.Label):
         self._command = command
         self._enabled = True
         self.bind("<Enter>", lambda e: self._enabled and self.configure(bg=hover))
-        self.bind("<Leave>", lambda e: self.configure(bg=bg if self._enabled else self["bg"]))
+        self.bind("<Leave>", lambda e: self.configure(bg=bg))
         self.bind("<Button-1>", lambda e: self._enabled and self._command())
 
     def set_enabled(self, enabled: bool):
@@ -101,6 +112,19 @@ class Button(tk.Label):
 class Card(tk.Frame):
     def __init__(self, master, **kw):
         super().__init__(master, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER, **kw)
+
+
+def card_header(card, fonts: Fonts, title: str, subtitle: str):
+    head = tk.Frame(card, bg=SURFACE)
+    head.pack(fill="x", padx=20, pady=(18, 12))
+    text = tk.Frame(head, bg=SURFACE)
+    text.pack(side="left", fill="x", expand=True)
+    tk.Label(text, text=title, bg=SURFACE, fg=TEXT, font=fonts.title).pack(anchor="w")
+    sub = tk.Label(text, text=subtitle, bg=SURFACE, fg=MUTED, font=fonts.small, anchor="w", justify="left")
+    sub.pack(anchor="w", pady=(2, 0))
+    actions = tk.Frame(head, bg=SURFACE)
+    actions.pack(side="right")
+    return sub, actions
 
 
 class ScrollArea(tk.Frame):
@@ -143,39 +167,246 @@ class ScrollArea(tk.Frame):
         self.canvas.yview_moveto(0)
 
 
+class ReportView(Card):
+    """보고서 한 건을 보여주는 카드: 배너 + 긴급도·요약 + 항목별 카드. 두 탭에서 함께 쓴다."""
+
+    def __init__(self, master, root: tk.Misc, fonts: Fonts, title: str, empty_title: str, empty_hint: str):
+        super().__init__(master)
+        self.root = root
+        self.fonts = fonts
+        self._text = ""
+        self._path: Path | None = None
+        self._banner_text = ""
+        self._hero_text = ""
+        self._wrap_labels: list[tk.Label] = []
+        f = fonts
+
+        self.meta_label, actions = card_header(self, f, title, "생성된 보고서가 여기에 표시됩니다")
+        self.open_button = Button(actions, "파일 열기", self._open, font=f.body)
+        self.open_button.pack(side="right", padx=(8, 0))
+        self.copy_button = Button(actions, "복사", self._copy, font=f.body)
+        self.copy_button.pack(side="right")
+        self.copy_button.set_enabled(False)
+        self.open_button.set_enabled(False)
+
+        self.banner_anchor = tk.Frame(self, bg=SURFACE, height=0)
+        self.banner_anchor.pack(fill="x", padx=20)
+        self.banner = tk.Frame(self, highlightthickness=1)
+        self.banner_icon = tk.Label(self.banner, font=f.body_bold, width=2)
+        self.banner_icon.pack(side="left", anchor="n", padx=(12, 4), pady=10)
+        self.banner_body = tk.Frame(self.banner)
+        self.banner_body.pack(side="left", fill="x", expand=True, pady=10, padx=(0, 12))
+
+        self.content = tk.Frame(self, bg=SURFACE)
+        self.content.pack(fill="both", expand=True, padx=20, pady=(8, 20))
+
+        self.empty_state = tk.Frame(self.content, bg=SURFACE)
+        inner = tk.Frame(self.empty_state, bg=SURFACE)
+        inner.place(relx=0.5, rely=0.45, anchor="center")
+        tk.Label(inner, text="📋", bg=SURFACE, fg=FAINT, font=f.icon).pack()
+        tk.Label(inner, text=empty_title, bg=SURFACE, fg=TEXT, font=f.title).pack(pady=(10, 4))
+        tk.Label(inner, text=empty_hint, bg=SURFACE, fg=MUTED, font=f.small).pack()
+
+        self.loading_state = tk.Frame(self.content, bg=SURFACE)
+        inner = tk.Frame(self.loading_state, bg=SURFACE)
+        inner.place(relx=0.5, rely=0.45, anchor="center")
+        tk.Label(inner, text="Claude가 메모를 정리하고 있습니다…", bg=SURFACE, fg=TEXT, font=f.title).pack()
+        tk.Label(inner, text="보통 10~30초 걸립니다. 메모에 없는 내용은 ‘미확인’으로 표시됩니다.",
+                 bg=SURFACE, fg=MUTED, font=f.small).pack(pady=(4, 14))
+        self.progress = ttk.Progressbar(inner, mode="indeterminate", length=320,
+                                        style="Accent.Horizontal.TProgressbar")
+        self.progress.pack()
+
+        self.result_area = ScrollArea(self.content)
+        self.result_area.inner.bind("<Configure>", self._rewrap, add="+")
+        self.text_view = tk.Text(self.content, wrap="word", font=f.mono, bg=SUBTLE, fg=TEXT, relief="flat",
+                                 padx=16, pady=14, highlightthickness=1, highlightbackground=BORDER)
+        self.show_state("empty")
+
+    # ---- 상태 ------------------------------------------------------------------
+    def show_state(self, name: str):
+        for state in (self.empty_state, self.loading_state, self.result_area, self.text_view):
+            state.pack_forget()
+        target = {"empty": self.empty_state, "loading": self.loading_state,
+                  "result": self.result_area, "text": self.text_view}[name]
+        target.pack(fill="both", expand=True)
+        if name == "loading":
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+
+    def set_banner(self, kind: str | None, title: str = "", lines: list[str] | None = None):
+        self._banner_text = "\n".join([title, *(lines or [])]).strip()
+        for child in self.banner_body.winfo_children():
+            child.destroy()
+        if kind is None:
+            self.banner.pack_forget()
+            return
+        bg, border, fg, icon = BANNERS[kind]
+        self.banner.configure(bg=bg, highlightbackground=border)
+        self.banner_body.configure(bg=bg)
+        self.banner_icon.configure(text=icon, bg=bg, fg=fg)
+        tk.Label(self.banner_body, text=title, bg=bg, fg=fg, font=self.fonts.body_bold, anchor="w",
+                 justify="left").pack(fill="x")
+        for line in lines or []:
+            tk.Label(self.banner_body, text=f"• {line}", bg=bg, fg=fg, font=self.fonts.small,
+                     anchor="w", justify="left", wraplength=640).pack(fill="x", pady=(2, 0))
+        self.banner.pack(in_=self.banner_anchor, fill="x", pady=(0, 4))
+        self.banner.lift(self.banner_anchor)  # anchor보다 나중에 그려야 가려지지 않는다
+
+    def status_text(self) -> str:
+        return "\n".join(filter(None, [self._hero_text, self._banner_text]))
+
+    # ---- 표시 ------------------------------------------------------------------
+    def show_report(self, report: HandoverReport, warnings: list[str], source_name: str, path: Path, text: str):
+        self._text, self._path = text, path
+        self.copy_button.set_enabled(bool(text))
+        self.open_button.set_enabled(True)
+        self.meta_label.configure(text=f"{source_name}  ·  {path.name}")
+        if warnings:
+            self.set_banner("warning", f"자동 점검 경고 {len(warnings)}건 — 원문과 대조해 확인하세요", warnings)
+        else:
+            self.set_banner("success", "자동 점검: 이상 없음 — 원문에 없는 숫자·단정 표현이 발견되지 않았습니다")
+        self._render(report)
+        self.show_state("result")
+
+    def show_record(self, record: Record):
+        try:
+            text = record.txt_path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        self.show_report(record.report, record.warnings, record.source_name, record.txt_path, text)
+
+    def show_text(self, text: str, path: Path):
+        self._text, self._path = text, path
+        self._hero_text = ""
+        self.copy_button.set_enabled(True)
+        self.open_button.set_enabled(True)
+        self.meta_label.configure(text=f"저장된 보고서  ·  {path.name}")
+        self.set_banner("info", "저장된 보고서를 보고 있습니다",
+                        ["새 보고서를 만들려면 메모를 입력하고 ‘보고서 생성’을 누르세요."])
+        self.text_view.configure(state="normal")
+        self.text_view.delete("1.0", "end")
+        self.text_view.insert("1.0", text)
+        self.text_view.configure(state="disabled")
+        self.show_state("text")
+
+    def _render(self, report: HandoverReport):
+        f = self.fonts
+        self.result_area.clear()
+        self._wrap_labels = []
+        inner = self.result_area.inner
+
+        accent, tint = PRIORITY_COLORS[report.priority]
+        self._hero_text = f"[{report.priority}] {report.priority_reason}\n{report.summary}"
+        hero = tk.Frame(inner, bg=tint, highlightthickness=1, highlightbackground=accent)
+        hero.pack(fill="x", pady=(0, 14), padx=(0, 8))
+        top = tk.Frame(hero, bg=tint)
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(top, text=f" {report.priority} ", bg=accent, fg="#FFFFFF", font=f.body_bold,
+                 padx=6, pady=2).pack(side="left")
+        tk.Label(top, text="긴급도", bg=tint, fg=MUTED, font=f.small).pack(side="left", padx=8)
+        summary = tk.Label(hero, text=report.summary or "요약 없음", bg=tint, fg=TEXT, font=f.hero,
+                           anchor="w", justify="left")
+        summary.pack(fill="x", padx=16)
+        reason = tk.Label(hero, text=f"판단 이유 · {report.priority_reason}", bg=tint, fg=MUTED, font=f.body,
+                          anchor="w", justify="left")
+        reason.pack(fill="x", padx=16, pady=(4, 14))
+        self._wrap_labels += [summary, reason]
+
+        for section in build_sections(report):
+            accent = ACCENTS[section.kind]
+            bg = UNCONFIRMED_BG if section.kind == "unconfirmed" else SURFACE
+            outer = tk.Frame(inner, bg=bg, highlightthickness=1,
+                             highlightbackground="#FDE68A" if section.kind == "unconfirmed" else BORDER)
+            outer.pack(fill="x", pady=(0, 12), padx=(0, 8))
+            tk.Frame(outer, bg=accent, width=4).pack(side="left", fill="y")
+            box = tk.Frame(outer, bg=bg)
+            box.pack(side="left", fill="both", expand=True, padx=16, pady=12)
+
+            head = tk.Frame(box, bg=bg)
+            head.pack(fill="x")
+            tk.Label(head, text=section.title, bg=bg, fg=TEXT, font=f.title).pack(side="left")
+            real = [line for line in section.lines if line != EMPTY]
+            if real:
+                tk.Label(head, text=f"{len(real)}건", bg=accent, fg="#FFFFFF", font=f.small_bold,
+                         padx=7).pack(side="left", padx=8)
+
+            for line in section.lines:
+                row = tk.Frame(box, bg=bg)
+                row.pack(fill="x", pady=(6, 0))
+                if line == EMPTY:
+                    label = tk.Label(row, text=line, bg=bg, fg=FAINT, font=f.body, anchor="w", justify="left")
+                    label.pack(side="left", fill="x", expand=True)
+                else:
+                    tk.Label(row, text="●", bg=bg, fg=accent, font=f.small).pack(side="left", anchor="n", pady=2)
+                    label = tk.Label(row, text=line, bg=bg, fg=TEXT, font=f.body, anchor="w", justify="left")
+                    label.pack(side="left", fill="x", expand=True, padx=(8, 0))
+                self._wrap_labels.append(label)
+        self._rewrap()
+
+    def _rewrap(self, _event=None):
+        width = max(self.result_area.inner.winfo_width() - 90, 200)
+        for label in self._wrap_labels:
+            if label.winfo_exists():
+                label.configure(wraplength=width)
+
+    # ---- 동작 ------------------------------------------------------------------
+    def _copy(self):
+        if not self._text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._text)
+        self.copy_button.configure(text="복사됨 ✓")
+        self.root.after(1500, lambda: self.copy_button.configure(text="복사"))
+
+    def _open(self):
+        if self._path and self._path.exists():
+            _open_path(self._path)
+
+
 class HandoverApp:
-    def __init__(self, root: tk.Tk, client_factory, out_dir: Path, samples_dir: Path,
+    def __init__(self, root: tk.Misc, client_factory, out_dir: Path, samples_dir: Path,
                  runner=None, api_ready: bool | None = None):
         self.root = root
         self.client_factory = client_factory
         self.out_dir = Path(out_dir)
         self.samples_dir = Path(samples_dir)
+        self.batch_folder = Path(samples_dir)
         self.runner = runner or (lambda fn: threading.Thread(target=fn, daemon=True).start())
         self.api_ready = api_ready
         self.fonts = Fonts(root)
         self.history_paths: list[Path] = []
+        self._records: list[Record] = []
         self._results: queue.Queue = queue.Queue()
         self._busy = False
+        self._batch_busy = False
+        self._batch_total = 0
+        self._batch_done = 0
+        self._batch_failed: list[str] = []
         self._client = None
+        self._client_lock = threading.Lock()
         self._source_name = "직접 입력"
         self._source_stem = "입력"
-        self._current_text = ""
-        self._current_path: Path | None = None
-        self._banner_text = ""
-        self._wrap_labels: list[tk.Label] = []
+        self._tabs: dict[str, tk.Label] = {}
+        self._views: dict[str, tk.Frame] = {}
 
         self._setup_root()
         self._build_header()
-        self._build_body()
+        self.body = tk.Frame(self.root, bg=BG)
+        self.body.pack(fill="both", expand=True, padx=20, pady=20)
+        self._views["editor"] = self._build_editor_tab(self.body)
+        self._views["dashboard"] = self._build_dashboard_tab(self.body)
         self.refresh_history()
-        self._show_state("empty")
+        self.refresh_dashboard()
+        self.show_tab("editor")
 
-    # ---- 레이아웃 --------------------------------------------------------------
+    # ---- 공통 레이아웃 ------------------------------------------------------------
     def _setup_root(self):
         self.root.title("교대 인수인계 보고서")
         self.root.configure(bg=BG)
-        self.root.geometry("1280x820")
-        self.root.minsize(1040, 680)
+        self.root.geometry("1360x860")
+        self.root.minsize(1120, 720)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("Accent.Horizontal.TProgressbar", troughcolor="#E2E8F0", background=PRIMARY,
@@ -186,6 +417,13 @@ class HandoverApp:
         style.configure("Slim.Vertical.TScrollbar", troughcolor=SURFACE, background="#CBD5E1",
                         bordercolor=SURFACE, lightcolor="#CBD5E1", darkcolor="#CBD5E1", width=8)
         style.map("Slim.Vertical.TScrollbar", background=[("active", "#94A3B8")])
+        f = self.fonts
+        style.configure("Dash.Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT,
+                        bordercolor=SURFACE, rowheight=38, font=f.body)
+        style.configure("Dash.Treeview.Heading", background=SUBTLE, foreground=MUTED, font=f.small_bold,
+                        relief="flat", bordercolor=BORDER, padding=(8, 8))
+        style.map("Dash.Treeview", background=[("selected", PRIMARY_SOFT)], foreground=[("selected", TEXT)])
+        style.map("Dash.Treeview.Heading", background=[("active", SUBTLE)])
         self.root.bind("<Control-Return>", lambda e: (self.generate(), "break")[1])
 
     def _build_header(self):
@@ -196,13 +434,20 @@ class HandoverApp:
 
         brand = tk.Frame(header, bg=HEADER)
         brand.pack(side="left", padx=24)
-        logo = tk.Label(brand, text="인", bg=PRIMARY, fg="#FFFFFF", font=f.title, width=2, pady=2)
-        logo.pack(side="left", pady=16)
+        tk.Label(brand, text="인", bg=PRIMARY, fg="#FFFFFF", font=f.title, width=2, pady=2).pack(side="left", pady=16)
         titles = tk.Frame(brand, bg=HEADER)
         titles.pack(side="left", padx=12)
         tk.Label(titles, text="교대 인수인계", bg=HEADER, fg="#FFFFFF", font=f.brand).pack(anchor="w")
         tk.Label(titles, text="작업 메모를 다음 근무자용 보고서로 정리합니다", bg=HEADER, fg=HEADER_MUTED,
                  font=f.small).pack(anchor="w")
+
+        tabs = tk.Frame(header, bg=HEADER_RAISED, padx=4, pady=4)
+        tabs.pack(side="left", padx=40)
+        for key, label in (("editor", "메모 작성"), ("dashboard", "대시보드")):
+            tab = tk.Label(tabs, text=label, font=f.body_bold, padx=18, pady=6, cursor="hand2")
+            tab.pack(side="left")
+            tab.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
+            self._tabs[key] = tab
 
         status = tk.Frame(header, bg=HEADER)
         status.pack(side="right", padx=24)
@@ -212,44 +457,45 @@ class HandoverApp:
             dot, label = "#34D399", "Claude API 연결 준비됨"
         else:
             dot, label = "#F87171", "API 키 없음 · .env 확인"
-        pill = tk.Frame(status, bg="#1E293B", padx=12, pady=5)
+        pill = tk.Frame(status, bg=HEADER_RAISED, padx=12, pady=5)
         pill.pack(side="right")
-        tk.Label(pill, text="●", bg="#1E293B", fg=dot, font=f.small).pack(side="left")
-        tk.Label(pill, text=f" {label}", bg="#1E293B", fg="#E2E8F0", font=f.small_bold).pack(side="left")
-        tk.Label(pill, text=f"  ·  {MODEL}", bg="#1E293B", fg=HEADER_MUTED, font=f.small).pack(side="left")
+        tk.Label(pill, text="●", bg=HEADER_RAISED, fg=dot, font=f.small).pack(side="left")
+        tk.Label(pill, text=f" {label}", bg=HEADER_RAISED, fg="#E2E8F0", font=f.small_bold).pack(side="left")
+        tk.Label(pill, text=f"  ·  {MODEL}", bg=HEADER_RAISED, fg=HEADER_MUTED, font=f.small).pack(side="left")
 
-    def _build_body(self):
-        body = tk.Frame(self.root, bg=BG)
-        body.pack(fill="both", expand=True, padx=20, pady=20)
-        body.columnconfigure(0, weight=5, minsize=400, uniform="cols")
-        body.columnconfigure(1, weight=7, uniform="cols")
-        body.rowconfigure(0, weight=1)
+    def show_tab(self, name: str):
+        for key, view in self._views.items():
+            view.pack_forget()
+            active = key == name
+            self._tabs[key].configure(bg=SURFACE if active else HEADER_RAISED,
+                                      fg=TEXT if active else HEADER_MUTED)
+        self._views[name].pack(fill="both", expand=True)
+        if name == "dashboard":
+            self.refresh_dashboard()
 
-        left = tk.Frame(body, bg=BG)
+    # ---- 메모 작성 탭 -------------------------------------------------------------
+    def _build_editor_tab(self, parent) -> tk.Frame:
+        view = tk.Frame(parent, bg=BG)
+        view.columnconfigure(0, weight=5, minsize=400, uniform="cols")
+        view.columnconfigure(1, weight=7, uniform="cols")
+        view.rowconfigure(0, weight=1)
+        left = tk.Frame(view, bg=BG)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         self._build_editor(left)
         self._build_history(left)
-        self._build_report(body)
-
-    def _card_header(self, card, title, subtitle):
-        head = tk.Frame(card, bg=SURFACE)
-        head.pack(fill="x", padx=20, pady=(18, 12))
-        text = tk.Frame(head, bg=SURFACE)
-        text.pack(side="left", fill="x", expand=True)
-        tk.Label(text, text=title, bg=SURFACE, fg=TEXT, font=self.fonts.title).pack(anchor="w")
-        sub = tk.Label(text, text=subtitle, bg=SURFACE, fg=MUTED, font=self.fonts.small)
-        sub.pack(anchor="w", pady=(2, 0))
-        actions = tk.Frame(head, bg=SURFACE)
-        actions.pack(side="right")
-        return sub, actions
+        self.report_view = ReportView(view, self.root, self.fonts, "인수인계 보고서",
+                                      "메모를 입력하고 ‘보고서 생성’을 누르세요",
+                                      "긴급도와 요약, 발생한 일부터 미확인 사항까지 항목별로 정리합니다")
+        self.report_view.grid(row=0, column=1, sticky="nsew")
+        return view
 
     def _build_editor(self, parent):
         f = self.fonts
         card = Card(parent)
         card.grid(row=0, column=0, sticky="nsew")
-        _, actions = self._card_header(card, "작업 메모", "교대 시 남길 내용을 그대로 적거나 붙여넣으세요")
+        _, actions = card_header(card, f, "작업 메모", "교대 시 남길 내용을 그대로 적거나 붙여넣으세요")
 
         self.sample_button = tk.Menubutton(actions, text="예시 메모  ▾", bg=SURFACE, fg=TEXT, font=f.body,
                                            relief="flat", cursor="hand2", padx=12, pady=6,
@@ -258,7 +504,7 @@ class HandoverApp:
         self.sample_menu = tk.Menu(self.sample_button, tearoff=False, font=f.body, bg=SURFACE,
                                    activebackground=PRIMARY_SOFT, activeforeground=PRIMARY)
         self.sample_button.configure(menu=self.sample_menu)
-        for path in sorted(self.samples_dir.glob("*.txt")):
+        for path in find_memos(self.samples_dir):
             self.sample_menu.add_command(label=path.stem, command=lambda p=path: self._load_file(p))
         self.sample_button.pack(side="right", padx=(8, 0))
         Button(actions, "파일 불러오기", self._choose_file, font=f.body).pack(side="right")
@@ -292,7 +538,7 @@ class HandoverApp:
         f = self.fonts
         card = Card(parent)
         card.grid(row=1, column=0, sticky="nsew", pady=(16, 0))
-        _, actions = self._card_header(card, "최근 보고서", "선택하면 저장된 보고서를 다시 볼 수 있습니다")
+        _, actions = card_header(card, f, "최근 보고서", "선택하면 저장된 보고서를 다시 볼 수 있습니다")
         Button(actions, "폴더 열기", self._open_folder, kind="ghost", font=f.body).pack(side="right")
         box = tk.Frame(card, bg=SURFACE)
         box.pack(fill="both", expand=True, padx=12, pady=(0, 14))
@@ -303,90 +549,9 @@ class HandoverApp:
         self.history_list.bind("<<ListboxSelect>>", self._on_history_select)
         self.history_empty = tk.Label(box, text="아직 생성한 보고서가 없습니다", bg=SURFACE, fg=FAINT, font=f.small)
 
-    def _build_report(self, parent):
-        f = self.fonts
-        card = Card(parent)
-        card.grid(row=0, column=1, sticky="nsew")
-        self.meta_label, actions = self._card_header(card, "인수인계 보고서", "생성된 보고서가 여기에 표시됩니다")
-        self.open_button = Button(actions, "파일 열기", self._open_current, font=f.body)
-        self.open_button.pack(side="right", padx=(8, 0))
-        self.copy_button = Button(actions, "복사", self._copy_current, font=f.body)
-        self.copy_button.pack(side="right")
-        self.copy_button.set_enabled(False)
-        self.open_button.set_enabled(False)
-
-        self.banner = tk.Frame(card, highlightthickness=1)
-        self.banner_icon = tk.Label(self.banner, font=f.body_bold, width=2)
-        self.banner_icon.pack(side="left", anchor="n", padx=(12, 4), pady=10)
-        self.banner_body = tk.Frame(self.banner)
-        self.banner_body.pack(side="left", fill="x", expand=True, pady=10, padx=(0, 12))
-        self.banner_anchor = tk.Frame(card, bg=SURFACE, height=0)
-        self.banner_anchor.pack(fill="x", padx=20)
-
-        self.content = tk.Frame(card, bg=SURFACE)
-        self.content.pack(fill="both", expand=True, padx=20, pady=(8, 20))
-
-        self.empty_state = tk.Frame(self.content, bg=SURFACE)
-        inner = tk.Frame(self.empty_state, bg=SURFACE)
-        inner.place(relx=0.5, rely=0.45, anchor="center")
-        tk.Label(inner, text="📋", bg=SURFACE, fg=FAINT, font=f.icon).pack()
-        tk.Label(inner, text="메모를 입력하고 ‘보고서 생성’을 누르세요", bg=SURFACE, fg=TEXT,
-                 font=f.title).pack(pady=(10, 4))
-        tk.Label(inner, text="발생한 일 · 조치한 내용 · 현재 상태 · 다음 근무자 확인 사항 · 미확인 사항으로 정리합니다",
-                 bg=SURFACE, fg=MUTED, font=f.small).pack()
-
-        self.loading_state = tk.Frame(self.content, bg=SURFACE)
-        inner = tk.Frame(self.loading_state, bg=SURFACE)
-        inner.place(relx=0.5, rely=0.45, anchor="center")
-        tk.Label(inner, text="Claude가 메모를 정리하고 있습니다…", bg=SURFACE, fg=TEXT, font=f.title).pack()
-        tk.Label(inner, text="보통 10~30초 걸립니다. 메모에 없는 내용은 ‘미확인’으로 표시됩니다.",
-                 bg=SURFACE, fg=MUTED, font=f.small).pack(pady=(4, 14))
-        self.progress = ttk.Progressbar(inner, mode="indeterminate", length=320,
-                                        style="Accent.Horizontal.TProgressbar")
-        self.progress.pack()
-
-        self.result_area = ScrollArea(self.content)
-        self.result_area.inner.bind("<Configure>", self._rewrap, add="+")
-
-        self.text_view = tk.Text(self.content, wrap="word", font=f.mono, bg=SUBTLE, fg=TEXT, relief="flat",
-                                 padx=16, pady=14, highlightthickness=1, highlightbackground=BORDER)
-
-    # ---- 상태 전환 ---------------------------------------------------------------
-    def _show_state(self, name: str):
-        for state in (self.empty_state, self.loading_state, self.result_area, self.text_view):
-            state.pack_forget()
-        target = {"empty": self.empty_state, "loading": self.loading_state,
-                  "result": self.result_area, "text": self.text_view}[name]
-        target.pack(fill="both", expand=True)
-        if name == "loading":
-            self.progress.start(12)
-        else:
-            self.progress.stop()
-
-    def _set_banner(self, kind: str | None, title: str = "", lines: list[str] | None = None):
-        self._banner_text = "\n".join([title, *(lines or [])]).strip()
-        for child in self.banner_body.winfo_children():
-            child.destroy()
-        if kind is None:
-            self.banner.pack_forget()
-            return
-        bg, border, fg, icon = BANNERS[kind]
-        self.banner.configure(bg=bg, highlightbackground=border)
-        self.banner_body.configure(bg=bg)
-        self.banner_icon.configure(text=icon, bg=bg, fg=fg)
-        tk.Label(self.banner_body, text=title, bg=bg, fg=fg, font=self.fonts.body_bold, anchor="w",
-                 justify="left").pack(fill="x")
-        for line in lines or []:
-            label = tk.Label(self.banner_body, text=f"• {line}", bg=bg, fg=fg, font=self.fonts.small,
-                             anchor="w", justify="left", wraplength=640)
-            label.pack(fill="x", pady=(2, 0))
-        self.banner.pack(in_=self.banner_anchor, fill="x", pady=(0, 4))
-        self.banner.lift(self.banner_anchor)  # anchor보다 나중에 그려야 가려지지 않는다
-
     def status_text(self) -> str:
-        return self._banner_text
+        return self.report_view.status_text()
 
-    # ---- 메모 입력 ---------------------------------------------------------------
     def _memo_text(self) -> str:
         return self.memo.get("1.0", "end-1c")
 
@@ -430,28 +595,32 @@ class HandoverApp:
         except (UnicodeDecodeError, OSError):
             messagebox.showerror("불러오기 실패", f"파일을 읽지 못했습니다.\n{path}\n\nUTF-8 또는 CP949 텍스트 파일인지 확인하세요.")
 
-    # ---- 보고서 생성 -------------------------------------------------------------
+    def _get_client(self):
+        with self._client_lock:
+            if self._client is None:
+                self._client = self.client_factory()
+            return self._client
+
     def generate(self):
         if self._busy:
             return
         memo = self._memo_text().strip()
         if not memo:
-            self._set_banner("info", "메모를 입력해주세요.", ["작업 메모를 적거나 ‘파일 불러오기’로 불러온 뒤 다시 누르세요."])
+            self.report_view.set_banner("info", "메모를 입력해주세요.",
+                                        ["작업 메모를 적거나 ‘파일 불러오기’로 불러온 뒤 다시 누르세요."])
             self.memo.focus_set()
             return
         self._busy = True
         self.generate_button.configure(text="정리 중…")
         self.generate_button.set_enabled(False)
-        self._set_banner(None)
-        self._show_state("loading")
+        self.report_view.set_banner(None)
+        self.report_view.show_state("loading")
         name, stem = self._source_name, self._source_stem
 
         def job():
             try:
-                if self._client is None:
-                    self._client = self.client_factory()
-                result = generate(memo, name, stem, self._client, self.out_dir)
-                self._results.put(("ok", result))
+                result = generate(memo, name, stem, self._get_client(), self.out_dir)
+                self._results.put(("ok", (result, name)))
             except ReportError as e:
                 self._results.put(("error", str(e)))
             except OSError as e:
@@ -460,9 +629,169 @@ class HandoverApp:
         self.runner(job)
         self.root.after(100, self._poll_loop)
 
+    # ---- 대시보드 탭 --------------------------------------------------------------
+    def _build_dashboard_tab(self, parent) -> tk.Frame:
+        f = self.fonts
+        view = tk.Frame(parent, bg=BG)
+
+        toolbar = Card(view)
+        toolbar.pack(fill="x")
+        self.folder_label, actions = card_header(toolbar, f, "일괄 처리", "")
+        self._update_folder_label()
+        self.batch_button = Button(actions, "전체 처리", self.run_batch, kind="primary", font=f.body_bold)
+        self.batch_button.pack(side="right", padx=(12, 0))
+        self.skip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(actions, text="이미 처리한 메모 건너뛰기", variable=self.skip_var, bg=SURFACE, fg=TEXT,
+                       activebackground=SURFACE, selectcolor=SURFACE, font=f.body, bd=0,
+                       highlightthickness=0, cursor="hand2").pack(side="right", padx=(12, 0))
+        Button(actions, "폴더 변경", self._choose_batch_folder, font=f.body).pack(side="right")
+        progress_row = tk.Frame(toolbar, bg=SURFACE)
+        progress_row.pack(fill="x", padx=20, pady=(0, 16))
+        self.batch_progress = ttk.Progressbar(progress_row, mode="determinate", length=260,
+                                              style="Accent.Horizontal.TProgressbar")
+        self.batch_progress.pack(side="left")
+        self.batch_status = tk.Label(progress_row, text="", bg=SURFACE, fg=MUTED, font=f.small, anchor="w",
+                                     justify="left")
+        self.batch_status.pack(side="left", padx=12, fill="x", expand=True)
+
+        tiles = tk.Frame(view, bg=BG)
+        tiles.pack(fill="x", pady=16)
+        self._tile_values: dict[str, tk.Label] = {}
+        tile_specs = [("전체", TEXT, "처리된 메모"), ("긴급", PRIORITY_COLORS["긴급"][0], "교대 직후 바로 조치"),
+                      ("주의", PRIORITY_COLORS["주의"][0], "근무 중 확인 필요"),
+                      ("일반", PRIORITY_COLORS["일반"][0], "마감·기록용"),
+                      ("경고", "#B45309", "자동 점검 경고가 있는 건"), ("실패", "#B91C1C", "최근 일괄 처리 실패")]
+        for i, (key, color, hint) in enumerate(tile_specs):
+            tiles.columnconfigure(i, weight=1, uniform="tiles")
+            tile = Card(tiles)
+            tile.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 12, 0))
+            tk.Frame(tile, bg=color, height=3).pack(fill="x")
+            tk.Label(tile, text=key, bg=SURFACE, fg=MUTED, font=f.small_bold).pack(anchor="w", padx=16, pady=(12, 0))
+            value = tk.Label(tile, text="0", bg=SURFACE, fg=color, font=f.stat)
+            value.pack(anchor="w", padx=16)
+            tk.Label(tile, text=hint, bg=SURFACE, fg=FAINT, font=f.small).pack(anchor="w", padx=16, pady=(0, 12))
+            self._tile_values[key] = value
+
+        main = tk.Frame(view, bg=BG)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, weight=6, uniform="dash")
+        main.columnconfigure(1, weight=5, uniform="dash")
+        main.rowconfigure(0, weight=1)
+
+        table = Card(main)
+        table.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        card_header(table, f, "처리 현황", "긴급 → 주의 → 일반 순으로 정렬됩니다. 행을 선택하면 오른쪽에 상세 보고서가 열립니다")
+        box = tk.Frame(table, bg=SURFACE)
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 14))
+        columns = ("priority", "memo", "summary", "unconfirmed", "warnings", "time")
+        self.tree = ttk.Treeview(box, columns=columns, show="headings", style="Dash.Treeview", selectmode="browse")
+        for col, heading, width, anchor, stretch in (
+                ("priority", "긴급도", 80, "center", False), ("memo", "메모", 170, "w", False),
+                ("summary", "요약", 300, "w", True), ("unconfirmed", "미확인", 64, "center", False),
+                ("warnings", "경고", 56, "center", False), ("time", "처리 시각", 100, "center", False)):
+            self.tree.heading(col, text=heading, anchor=anchor)
+            self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
+        for priority, (accent, tint) in PRIORITY_COLORS.items():
+            self.tree.tag_configure(priority, background=tint if priority != "일반" else SURFACE)
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview, style="Slim.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self._on_dashboard_select)
+        self.dashboard_empty = tk.Label(box, text="아직 처리한 메모가 없습니다.\n‘전체 처리’를 눌러 폴더의 메모를 한 번에 정리하세요.",
+                                        bg=SURFACE, fg=FAINT, font=f.body, justify="center")
+
+        self.detail_view = ReportView(main, self.root, self.fonts, "상세 보고서",
+                                      "목록에서 메모를 선택하세요", "선택한 건의 긴급도·요약·항목별 내용이 여기에 표시됩니다")
+        self.detail_view.grid(row=0, column=1, sticky="nsew")
+        return view
+
+    def _update_folder_label(self):
+        count = len(find_memos(self.batch_folder)) if self.batch_folder.is_dir() else 0
+        self.folder_label.configure(text=f"메모 폴더: {self.batch_folder}  ·  .txt {count}건")
+
+    def _choose_batch_folder(self):
+        folder = filedialog.askdirectory(title="메모 폴더 선택", initialdir=self.batch_folder)
+        if folder:
+            self.batch_folder = Path(folder)
+            self._update_folder_label()
+
+    def batch_status_text(self) -> str:
+        return self.batch_status.cget("text")
+
+    def run_batch(self):
+        if self._batch_busy:
+            return
+        files = find_memos(self.batch_folder) if self.batch_folder.is_dir() else []
+        if not files:
+            self.batch_status.configure(text="선택한 폴더에 .txt 메모가 없습니다", fg="#B91C1C")
+            return
+        skip = {r.memo_hash for r in load_records(self.out_dir)} if self.skip_var.get() else None
+        self._batch_busy = True
+        self._batch_total, self._batch_done, self._batch_failed = len(files), 0, []
+        self.batch_button.configure(text="처리 중…")
+        self.batch_button.set_enabled(False)
+        self.batch_progress.configure(maximum=len(files), value=0)
+        self.batch_status.configure(text=f"0/{len(files)} 처리 중 · 최대 4건 동시", fg=MUTED)
+
+        def on_update(item):
+            if item.status != "처리 중":
+                self._results.put(("batch_item", (item.path.name, item.status, item.message)))
+
+        def job():
+            try:
+                client = self._get_client()
+            except ReportError as e:
+                self._results.put(("batch_error", str(e)))
+                return
+            items = run_batch(files, client, self.out_dir, on_update, skip_hashes=skip)
+            self._results.put(("batch_done", items))
+
+        self.runner(job)
+        self.root.after(100, self._poll_loop)
+
+    def refresh_dashboard(self):
+        self._records = sort_for_dashboard(load_records(self.out_dir))
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(self._records):
+            self.tree.insert("", "end", iid=str(i), tags=(r.report.priority,), values=(
+                f"● {r.report.priority}", r.source_name, r.report.summary,
+                len(r.report.unconfirmed) or "–", len(r.warnings) or "–", f"{r.created_at:%m/%d %H:%M}"))
+        if self._records:
+            self.dashboard_empty.place_forget()
+        else:
+            self.dashboard_empty.place(relx=0.5, rely=0.4, anchor="center")
+        counts = {"전체": len(self._records), "긴급": 0, "주의": 0, "일반": 0,
+                  "경고": sum(1 for r in self._records if r.warnings), "실패": len(self._batch_failed)}
+        for r in self._records:
+            counts[r.report.priority] += 1
+        self._counts = counts
+        for key, label in self._tile_values.items():
+            label.configure(text=str(counts[key]))
+
+    def dashboard_rows(self) -> list[tuple]:
+        return [(r.report.priority, r.source_name, r.report.summary, r.report.priority_reason,
+                 len(r.report.unconfirmed), len(r.warnings)) for r in self._records]
+
+    def tile_counts(self) -> dict[str, int]:
+        return dict(self._counts)
+
+    def select_dashboard_row(self, index: int):
+        self.tree.selection_set(str(index))
+        self._on_dashboard_select()
+
+    def _on_dashboard_select(self, _event=None):
+        sel = self.tree.selection()
+        if sel:
+            self.detail_view.show_record(self._records[int(sel[0])])
+
+    def detail_status_text(self) -> str:
+        return self.detail_view.status_text()
+
+    # ---- 결과 처리 ---------------------------------------------------------------
     def _poll_loop(self):
         self.poll_results()
-        if self._busy:
+        if self._busy or self._batch_busy:
             self.root.after(100, self._poll_loop)
 
     def poll_results(self):
@@ -471,74 +800,55 @@ class HandoverApp:
                 kind, payload = self._results.get_nowait()
             except queue.Empty:
                 return
-            self._busy = False
-            self.generate_button.configure(text="보고서 생성")
-            self.generate_button.set_enabled(True)
-            if kind == "ok":
-                self.show_result(payload)
-            else:
-                self._show_state("empty")
-                self._set_banner("error", f"보고서를 만들지 못했습니다 — {payload}",
-                                 ["잠시 후 다시 시도하거나, .env의 API 키와 인터넷 연결을 확인하세요."])
+            if kind in ("ok", "error"):
+                self._finish_single(kind, payload)
+            elif kind == "batch_item":
+                name, status, message = payload
+                self._batch_done += 1
+                if status == "실패":
+                    self._batch_failed.append(f"{name}: {message}")
+                self.batch_progress.configure(value=self._batch_done)
+                self.batch_status.configure(
+                    text=f"{self._batch_done}/{self._batch_total} 처리 중 · 실패 {len(self._batch_failed)}건", fg=MUTED)
+            elif kind == "batch_done":
+                self._finish_batch(payload)
+            elif kind == "batch_error":
+                self._batch_busy = False
+                self.batch_button.configure(text="전체 처리")
+                self.batch_button.set_enabled(True)
+                self.batch_status.configure(text=f"일괄 처리를 시작하지 못했습니다 — {payload}", fg="#B91C1C")
 
-    def show_result(self, result: GenerationResult):
-        self._current_text, self._current_path = result.text, result.path
-        self.copy_button.set_enabled(True)
-        self.open_button.set_enabled(True)
-        self.meta_label.configure(text=f"{self._source_name}  ·  저장됨: {result.path.name}")
-        if result.warnings:
-            self._set_banner("warning", f"자동 점검 경고 {len(result.warnings)}건 — 원문과 대조해 확인하세요",
-                             result.warnings)
+    def _finish_single(self, kind, payload):
+        self._busy = False
+        self.generate_button.configure(text="보고서 생성")
+        self.generate_button.set_enabled(True)
+        if kind == "ok":
+            result, name = payload
+            self.report_view.show_report(result.report, result.warnings, name, result.path, result.text)
+            self.refresh_history()
+            self.refresh_dashboard()
         else:
-            self._set_banner("success", "자동 점검: 이상 없음 — 원문에 없는 숫자·단정 표현이 발견되지 않았습니다")
-        self._render_sections(result)
-        self._show_state("result")
+            self.report_view.show_state("empty")
+            self.report_view.set_banner("error", f"보고서를 만들지 못했습니다 — {payload}",
+                                        ["잠시 후 다시 시도하거나, .env의 API 키와 인터넷 연결을 확인하세요."])
+
+    def _finish_batch(self, items):
+        self._batch_busy = False
+        self.batch_button.configure(text="전체 처리")
+        self.batch_button.set_enabled(True)
+        done = sum(1 for i in items if i.status == "완료")
+        skipped = sum(1 for i in items if i.status == "건너뜀")
+        failed = [f"{i.path.name}: {i.message}" for i in items if i.status == "실패"]
+        self._batch_failed = failed
+        self.batch_progress.configure(value=len(items))
+        text = f"완료 {done}건 · 건너뜀 {skipped}건 · 실패 {len(failed)}건"
+        if failed:
+            text += "\n" + "\n".join(failed[:3]) + (f"\n외 {len(failed) - 3}건" if len(failed) > 3 else "")
+        self.batch_status.configure(text=text, fg="#B91C1C" if failed else "#047857")
+        self.refresh_dashboard()
         self.refresh_history()
-        if self.history_paths:
-            self.history_list.selection_clear(0, "end")
 
-    def _render_sections(self, result: GenerationResult):
-        f = self.fonts
-        self.result_area.clear()
-        self._wrap_labels = []
-        for section in build_sections(result.report):
-            accent = ACCENTS[section.kind]
-            bg = UNCONFIRMED_BG if section.kind == "unconfirmed" else SURFACE
-            outer = tk.Frame(self.result_area.inner, bg=bg, highlightthickness=1,
-                             highlightbackground="#FDE68A" if section.kind == "unconfirmed" else BORDER)
-            outer.pack(fill="x", pady=(0, 12), padx=(0, 8))
-            tk.Frame(outer, bg=accent, width=4).pack(side="left", fill="y")
-            box = tk.Frame(outer, bg=bg)
-            box.pack(side="left", fill="both", expand=True, padx=16, pady=12)
-
-            head = tk.Frame(box, bg=bg)
-            head.pack(fill="x")
-            tk.Label(head, text=section.title, bg=bg, fg=TEXT, font=f.title).pack(side="left")
-            real = [line for line in section.lines if line != EMPTY]
-            if real:
-                tk.Label(head, text=f"{len(real)}건", bg=accent, fg="#FFFFFF", font=f.small_bold,
-                         padx=7).pack(side="left", padx=8)
-
-            for line in section.lines:
-                row = tk.Frame(box, bg=bg)
-                row.pack(fill="x", pady=(6, 0))
-                if line == EMPTY:
-                    label = tk.Label(row, text=line, bg=bg, fg=FAINT, font=f.body, anchor="w", justify="left")
-                    label.pack(side="left", fill="x", expand=True)
-                else:
-                    tk.Label(row, text="●", bg=bg, fg=accent, font=f.small).pack(side="left", anchor="n", pady=2)
-                    label = tk.Label(row, text=line, bg=bg, fg=TEXT, font=f.body, anchor="w", justify="left")
-                    label.pack(side="left", fill="x", expand=True, padx=(8, 0))
-                self._wrap_labels.append(label)
-        self._rewrap()
-
-    def _rewrap(self, _event=None):
-        width = max(self.result_area.inner.winfo_width() - 90, 200)
-        for label in self._wrap_labels:
-            if label.winfo_exists():
-                label.configure(wraplength=width)
-
-    # ---- 보고서 이력 / 동작 --------------------------------------------------------
+    # ---- 보고서 이력 --------------------------------------------------------------
     def refresh_history(self):
         paths = sorted(self.out_dir.glob("인수인계_*.txt"), key=lambda p: p.stat().st_mtime, reverse=True) \
             if self.out_dir.is_dir() else []
@@ -569,28 +879,7 @@ class HandoverApp:
         except OSError as e:
             messagebox.showerror("열기 실패", str(e))
             return
-        self._current_text, self._current_path = text, path
-        self.copy_button.set_enabled(True)
-        self.open_button.set_enabled(True)
-        self.meta_label.configure(text=f"저장된 보고서  ·  {path.name}")
-        self._set_banner("info", "저장된 보고서를 보고 있습니다", ["새 보고서를 만들려면 메모를 입력하고 ‘보고서 생성’을 누르세요."])
-        self.text_view.configure(state="normal")
-        self.text_view.delete("1.0", "end")
-        self.text_view.insert("1.0", text)
-        self.text_view.configure(state="disabled")
-        self._show_state("text")
-
-    def _copy_current(self):
-        if not self._current_text:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self._current_text)
-        self.copy_button.configure(text="복사됨 ✓")
-        self.root.after(1500, lambda: self.copy_button.configure(text="복사"))
-
-    def _open_current(self):
-        if self._current_path and self._current_path.exists():
-            _open_path(self._current_path)
+        self.report_view.show_text(text, path)
 
     def _open_folder(self):
         self.out_dir.mkdir(parents=True, exist_ok=True)

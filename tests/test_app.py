@@ -83,3 +83,74 @@ def test_app_shows_error_on_failure(root, tmp_path):
     app.poll_results()
     assert "거절" in app.status_text()
     assert not (tmp_path / "reports").exists() or not list((tmp_path / "reports").iterdir())
+
+
+def write_memos(folder, names):
+    for name in names:
+        (folder / f"{name}.txt").write_text(f"{name} 메모", encoding="utf-8")
+
+
+def test_dashboard_batch_sorted_and_counted(root, tmp_path):
+    write_memos(tmp_path, ["a", "b", "c"])
+    fake = FakeClient(results=[("end_turn", make_report(priority=p, summary=p)) for p in ("일반", "긴급", "주의")])
+    app = make_app(root, tmp_path, fake)
+    app.show_tab("dashboard")
+    app.run_batch()
+    app.poll_results()
+    rows = app.dashboard_rows()
+    assert [r[0] for r in rows] == ["긴급", "주의", "일반"]
+    assert app.tile_counts() == {"전체": 3, "긴급": 1, "주의": 1, "일반": 1, "경고": 0, "실패": 0}
+
+
+def test_dashboard_second_batch_skips_processed(root, tmp_path):
+    write_memos(tmp_path, ["a", "b"])
+    fake = FakeClient("end_turn", SAMPLE_REPORT)
+    app = make_app(root, tmp_path, fake)
+    app.run_batch()
+    app.poll_results()
+    app.run_batch()
+    app.poll_results()
+    assert len(fake.calls) == 2
+    assert len(app.dashboard_rows()) == 2
+
+
+def test_dashboard_empty_folder(root, tmp_path):
+    fake = FakeClient("end_turn", SAMPLE_REPORT)
+    app = make_app(root, tmp_path, fake)
+    app.run_batch()
+    assert ".txt 메모가 없습니다" in app.batch_status_text()
+    assert fake.calls == []
+
+
+def test_dashboard_ignores_second_run_while_busy(root, tmp_path):
+    write_memos(tmp_path, ["a"])
+    jobs = []
+    from app import HandoverApp
+    app = HandoverApp(root, client_factory=lambda: FakeClient("end_turn", SAMPLE_REPORT),
+                      out_dir=tmp_path / "reports", samples_dir=tmp_path, runner=jobs.append)
+    app.run_batch()
+    app.run_batch()
+    assert len(jobs) == 1
+
+
+def test_dashboard_select_shows_detail(root, tmp_path):
+    write_memos(tmp_path, ["a"])
+    report = make_report(summary="2호기 누유 의심", priority="긴급", priority_reason="설비 아래 액체 발견")
+    app = make_app(root, tmp_path, FakeClient("end_turn", report))
+    app.run_batch()
+    app.poll_results()
+    app.select_dashboard_row(0)
+    assert "설비 아래 액체 발견" in app.detail_status_text()
+
+
+def test_dashboard_loads_existing_records_on_start(root, tmp_path):
+    write_memos(tmp_path, ["a"])
+    app = make_app(root, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+    app.run_batch()
+    app.poll_results()
+    window = tk.Toplevel(root)
+    try:
+        again = make_app(window, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+        assert len(again.dashboard_rows()) == 1
+    finally:
+        window.destroy()
