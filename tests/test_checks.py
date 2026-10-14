@@ -44,3 +44,22 @@ def test_no_numbers_memo_clean():  # 작업메모_03
         unconfirmed=[Unconfirmed(subject="발생 시각", note="")],
     )
     assert check_report(r, memo) == []
+
+
+def test_hedged_resolution_not_flagged():  # live 01 / 05 phrasings
+    r = report_with(actions=[
+        Item(text="재가동 이후 20개 확인 결과 정상 (20개만 확인, 문제 해결 여부는 확정 아님)", source_quote="이후 20개 확인했는데 정상."),
+        Item(text="20개 재확인 결과 정상 (문제 해결이 확인된 것은 아님)", source_quote="이후 20개 확인했는데 정상."),
+    ])
+    assert check_report(r, MEMO01) == []
+
+
+def test_unconfirmed_not_checked_for_resolution_words():  # live 10 phrasing
+    r = report_with(unconfirmed=[Unconfirmed(subject="라벨 재부착 완료 시각", note="")])
+    assert check_report(r, MEMO01) == []
+
+
+def test_spacing_variants_flagged():
+    for text in ("라벨 문제 없음", "라벨 이상없음"):
+        r = report_with(current_status=[Item(text=text, source_quote="이후 20개 확인했는데 정상.")])
+        assert any("단정 표현" in w for w in check_report(r, MEMO01)), text

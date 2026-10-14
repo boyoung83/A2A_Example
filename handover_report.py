@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import TextIO
 
 from handover.checks import check_report
+from handover.files import read_memo_file, save_report
 from handover.llm import ReportError, summarize
 from handover.render import render_report
 
 KEY_FILE = Path(__file__).resolve().parent / "claudeapi.txt"
+
+__all__ = ["load_api_key", "main", "read_memo_interactive", "save_report"]
 
 
 def load_api_key(env, key_file: Path) -> str | None:
@@ -38,18 +41,6 @@ def read_memo_interactive(stream: TextIO) -> str:
             break
         lines.append(line)
     return "\n".join(lines).strip()
-
-
-def save_report(text: str, out_dir: Path, source_stem: str, now: datetime) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    base = f"인수인계_{source_stem}_{now:%Y%m%d_%H%M%S}"
-    path = out_dir / f"{base}.txt"
-    n = 2
-    while path.exists():
-        path = out_dir / f"{base}_{n}.txt"
-        n += 1
-    path.write_text(text, encoding="utf-8")
-    return path
 
 
 def process(memo: str, source_name: str, source_stem: str, out_dir: Path, client) -> Path:
@@ -75,6 +66,7 @@ def main(argv: list[str] | None = None, client=None) -> int:
     parser.add_argument("--out", type=Path, default=Path("reports"), help="보고서 저장 폴더 (기본: reports)")
     args = parser.parse_args(argv)
 
+    # (표시 이름, 저장용 이름, 메모 파일 또는 None, 직접 입력한 메모 또는 None)
     if args.dir is not None:
         if not args.dir.is_dir():
             print(f"폴더를 찾을 수 없습니다: {args.dir}", file=sys.stderr)
@@ -83,17 +75,23 @@ def main(argv: list[str] | None = None, client=None) -> int:
         if not files:
             print(f"폴더에 .txt 메모가 없습니다: {args.dir}", file=sys.stderr)
             return 2
-        sources = [(f.name, f.stem, f.read_text(encoding="utf-8-sig")) for f in files]
+        sources = [(f.name, f.stem, f, None) for f in files]
     elif args.file is not None:
         if not args.file.is_file():
             print(f"파일을 찾을 수 없습니다: {args.file}", file=sys.stderr)
             return 2
-        sources = [(args.file.name, args.file.stem, args.file.read_text(encoding="utf-8-sig"))]
+        try:
+            memo = read_memo_file(args.file)
+        except (UnicodeDecodeError, OSError) as e:
+            print(f"파일을 읽지 못했습니다: {args.file} ({e.reason if isinstance(e, UnicodeDecodeError) else e})",
+                  file=sys.stderr)
+            return 2
+        sources = [(args.file.name, args.file.stem, None, memo)]
     else:
         print("메모를 붙여넣고 빈 줄에서 Enter를 두 번 누르세요.")
-        sources = [("직접 입력", "입력", read_memo_interactive(sys.stdin))]
+        sources = [("직접 입력", "입력", None, read_memo_interactive(sys.stdin))]
 
-    if args.dir is None and not sources[0][2].strip():
+    if args.dir is None and not sources[0][3].strip():
         print("메모가 비어 있습니다.", file=sys.stderr)
         return 2
 
@@ -107,13 +105,21 @@ def main(argv: list[str] | None = None, client=None) -> int:
         client = anthropic.Anthropic(api_key=api_key)
 
     failed = 0
-    for name, stem, memo in sources:
-        if not memo.strip():
-            print(f"[{name}] 메모가 비어 있습니다.", file=sys.stderr)
-            failed += 1
-            continue
+    for name, stem, path, memo in sources:
         try:
+            if memo is None:
+                memo = read_memo_file(path)
+            if not memo.strip():
+                print(f"[{name}] 메모가 비어 있습니다.", file=sys.stderr)
+                failed += 1
+                continue
             process(memo, name, stem, args.out, client)
+        except UnicodeDecodeError:
+            print(f"[{name}] 파일을 읽지 못했습니다 (UTF-8/CP949가 아님)", file=sys.stderr)
+            failed += 1
+        except OSError as e:
+            print(f"[{name}] 파일 처리 실패: {e}", file=sys.stderr)
+            failed += 1
         except ReportError as e:
             print(f"[{name}] 보고서 생성 실패: {e}", file=sys.stderr)
             failed += 1

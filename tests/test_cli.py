@@ -61,3 +61,14 @@ def test_api_key_from_file(tmp_path):
 
 def test_api_key_missing(tmp_path):
     assert load_api_key({}, tmp_path / "claudeapi.txt") is None
+
+
+def test_dir_reads_cp949_and_skips_undecodable(tmp_path):
+    (tmp_path / "a.txt").write_bytes("08:40 라벨 비뚤어짐.".encode("cp949"))
+    (tmp_path / "b.txt").write_bytes(b"\x80\xff\x80\xff")
+    (tmp_path / "c.txt").write_text("메모", encoding="utf-8")
+    out_dir = tmp_path / "r"
+    fake = FakeClient("end_turn", SAMPLE_REPORT)
+    assert main(["--dir", str(tmp_path), "--out", str(out_dir)], client=fake) == 1
+    assert len(list(out_dir.glob("*.txt"))) == 2
+    assert "라벨 비뚤어짐" in fake.calls[0]["messages"][0]["content"]

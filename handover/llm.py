@@ -1,5 +1,6 @@
 """Claude API 호출: 메모 → HandoverReport."""
 import anthropic
+import pydantic
 
 from handover.prompt import SYSTEM_PROMPT, build_user_message
 from handover.schema import HandoverReport
@@ -29,6 +30,8 @@ def summarize(memo: str, client) -> HandoverReport:
         raise ReportError("API 서버에 연결하지 못했습니다") from e
     except anthropic.APIStatusError as e:
         raise ReportError(f"API 오류 ({e.status_code})") from e
+    except (pydantic.ValidationError, anthropic.APIError) as e:
+        raise ReportError("응답 형식을 해석하지 못했습니다") from e
 
     if response.stop_reason == "refusal":
         raise ReportError("Claude가 요청을 거절했습니다")

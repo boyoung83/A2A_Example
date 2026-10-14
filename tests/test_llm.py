@@ -21,3 +21,12 @@ def test_refusal_raises():
 def test_unparsed_raises():
     with pytest.raises(ReportError):
         summarize("메모", FakeClient(stop_reason="end_turn", parsed=None))
+
+
+def test_unparseable_json_becomes_report_error():
+    try:
+        HandoverReport.model_validate_json('{"events": [')
+    except Exception as e:  # pydantic.ValidationError, as the SDK raises on truncated output
+        err = e
+    with pytest.raises(ReportError, match="해석"):
+        summarize("메모", FakeClient(error=err))
