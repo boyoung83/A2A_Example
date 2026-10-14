@@ -2,20 +2,32 @@ import tkinter as tk
 
 import pytest
 
-from conftest import SAMPLE_REPORT, FakeClient
-from handover.schema import HandoverReport, Unconfirmed
+from conftest import SAMPLE_REPORT, FakeClient, make_report
+from handover.schema import Contact, Fact, TimelineEntry, Unconfirmed
 from handover.view import build_sections
 
 
 def test_build_sections_order_and_placeholders():
-    r = HandoverReport(events=[], actions=[], current_status=[], next_checks=[],
-                       unconfirmed=[Unconfirmed(subject="라벨 여분 수량", note="수량은 못 셈."),
-                                    Unconfirmed(subject="원인", note="")])
+    r = make_report(unconfirmed=[Unconfirmed(subject="라벨 여분 수량", note="수량은 못 셈."),
+                                 Unconfirmed(subject="원인", note="")])
     sections = build_sections(r)
-    assert [s.title for s in sections] == ["발생한 일", "조치한 내용", "현재 상태", "다음 근무자 확인 사항", "미확인 사항"]
+    assert [s.title for s in sections] == ["발생한 일", "조치한 내용", "현재 상태", "다음 근무자 확인 사항",
+                                           "시간순 경과", "주요 수치·대상", "연락·요청 현황", "미확인 사항"]
     assert sections[0].lines == ["메모에 기록 없음"]
-    assert sections[4].lines == ["라벨 여분 수량: 미확인 (수량은 못 셈.)", "원인: 미확인"]
-    assert sections[4].kind == "unconfirmed"
+    assert sections[7].lines == ["라벨 여분 수량: 미확인 (수량은 못 셈.)", "원인: 미확인"]
+    assert sections[7].kind == "unconfirmed"
+
+
+def test_build_sections_detail_formats():
+    r = make_report(
+        timeline=[TimelineEntry(time="14:10", text="진동 발생", source_quote="q")],
+        key_facts=[Fact(label="대기 제품", value="12개", source_quote="q")],
+        contacts=[Contact(party="설비팀", request="점검 요청", status="결과 미회신", source_quote="q")],
+    )
+    by_kind = {s.kind: s.lines for s in build_sections(r)}
+    assert by_kind["timeline"] == ["14:10  진동 발생"]
+    assert by_kind["facts"] == ["대기 제품: 12개"]
+    assert by_kind["contacts"] == ["설비팀 — 점검 요청 — 결과 미회신"]
 
 
 @pytest.fixture

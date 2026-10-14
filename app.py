@@ -45,6 +45,9 @@ ACCENTS = {
     "actions": "#059669",
     "status": "#7C3AED",
     "checks": "#EA580C",
+    "timeline": "#0891B2",
+    "facts": "#475569",
+    "contacts": "#DB2777",
     "unconfirmed": "#D97706",
 }
 UNCONFIRMED_BG = "#FFFBEB"

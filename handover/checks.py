@@ -29,22 +29,31 @@ def check_report(report: HandoverReport, memo: str) -> list[str]:
     warnings: list[str] = []
 
     items = report.events + report.actions + report.current_status + report.next_checks
-    unconfirmed_texts = [s for u in report.unconfirmed for s in (u.subject, u.note) if s]
+    quoted = [*items, *report.timeline, *report.key_facts, *report.contacts]
 
-    for sentence in [item.text for item in items] + unconfirmed_texts:
+    # 단정 표현을 검사할 문장 (미확인 항목은 정의상 미확인이므로 제외)
+    claims = [report.summary, report.priority_reason, *(i.text for i in items),
+              *(t.text for t in report.timeline), *(c.status for c in report.contacts)]
+    # 숫자를 검사할 문장
+    numbered = claims + [f"{t.time} {t.text}" for t in report.timeline] \
+        + [f"{f.label}: {f.value}" for f in report.key_facts] \
+        + [f"{c.party} {c.request}" for c in report.contacts] \
+        + [s for u in report.unconfirmed for s in (u.subject, u.note)]
+
+    for sentence in filter(None, numbered):
         for n in sorted(extract_numbers(sentence) - memo_numbers):
             warnings.append(f"원문에 없는 숫자 '{n}': {sentence}")
 
-    for item in items:
-        compact = _compact(item.text)
+    for sentence in filter(None, claims):
+        compact = _compact(sentence)
         if any(marker in compact for marker in HEDGE_MARKERS):
             continue
         for word in RESOLUTION_WORDS:
             if word in compact and word not in memo_compact:
-                warnings.append(f"원문에 없는 단정 표현 '{word}': {item.text}")
+                warnings.append(f"원문에 없는 단정 표현 '{word}': {sentence}")
 
-    for item in items:
-        if _normalize(item.source_quote) not in memo_norm:
-            warnings.append(f"근거 문장이 원문에 없음: {item.source_quote}")
+    for entry in quoted:
+        if _normalize(entry.source_quote) not in memo_norm:
+            warnings.append(f"근거 문장이 원문에 없음: {entry.source_quote}")
 
     return warnings

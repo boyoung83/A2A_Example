@@ -2,9 +2,9 @@ from datetime import datetime
 
 import pytest
 
-from conftest import SAMPLE_REPORT, FakeClient
+from conftest import SAMPLE_REPORT, FakeClient, make_report
 from handover.llm import ReportError
-from handover.schema import HandoverReport, Item
+from handover.schema import Item
 from handover.service import generate
 
 
@@ -19,8 +19,7 @@ def test_generate_renders_saves_and_returns_parts(tmp_path):
 
 
 def test_generate_reports_warnings(tmp_path):
-    bad = HandoverReport(events=[Item(text="라벨 10장 남음", source_quote="08:40 라벨 비뚤어짐.")],
-                         actions=[], current_status=[], next_checks=[], unconfirmed=[])
+    bad = make_report(events=[Item(text="라벨 10장 남음", source_quote="08:40 라벨 비뚤어짐.")])
     result = generate("08:40 라벨 비뚤어짐.", "m", "m", FakeClient("end_turn", bad), tmp_path)
     assert any("'10'" in w for w in result.warnings)
 

@@ -1,15 +1,11 @@
 """HandoverReport를 고정 양식의 인수인계 보고서 텍스트로 만든다."""
 from datetime import datetime
 
-from handover.schema import HandoverReport, Item
+from handover.schema import HandoverReport
+from handover.view import build_sections
 
-EMPTY = "- 메모에 기록 없음"
 DOUBLE = "=" * 30
 SINGLE = "-" * 30
-
-
-def _items(items: list[Item]) -> list[str]:
-    return [f"- {item.text}" for item in items] or [EMPTY]
 
 
 def render_report(report: HandoverReport, memo: str, source_name: str,
@@ -18,16 +14,13 @@ def render_report(report: HandoverReport, memo: str, source_name: str,
         DOUBLE,
         " 교대 인수인계 보고서",
         f" 작성: {created_at:%Y-%m-%d %H:%M} / 원문: {source_name}",
+        f" 긴급도: [{report.priority}] {report.priority_reason}",
+        f" 요약: {report.summary}",
         DOUBLE,
-        "■ 발생한 일", *_items(report.events),
-        "■ 조치한 내용", *_items(report.actions),
-        "■ 현재 상태", *_items(report.current_status),
-        "■ 다음 근무자 확인 사항", *_items(report.next_checks),
-        "■ 미확인 사항",
     ]
-    unconfirmed = [f"- {u.subject}: 미확인" + (f" ({u.note})" if u.note else "")
-                   for u in report.unconfirmed]
-    lines += unconfirmed or [EMPTY]
+    for section in build_sections(report):
+        lines.append(f"■ {section.title}")
+        lines += [f"- {line}" for line in section.lines]
 
     lines.append(SINGLE)
     if warnings:

@@ -2,9 +2,19 @@ from types import SimpleNamespace
 
 from handover.schema import HandoverReport, Item
 
-SAMPLE_REPORT = HandoverReport(
+
+def make_report(**kw) -> HandoverReport:
+    fields = dict(summary="", events=[], actions=[], current_status=[], next_checks=[],
+                  timeline=[], key_facts=[], contacts=[], unconfirmed=[],
+                  priority_reason="", priority="일반")
+    fields.update(kw)
+    return HandoverReport(**fields)
+
+
+SAMPLE_REPORT = make_report(
+    summary="라벨 비뚤어짐",
     events=[Item(text="08:40 라벨 비뚤어짐", source_quote="08:40 라벨 비뚤어짐.")],
-    actions=[], current_status=[], next_checks=[], unconfirmed=[],
+    priority_reason="라벨 비뚤어짐 기록",
 )
 
 

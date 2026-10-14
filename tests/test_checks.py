@@ -1,5 +1,6 @@
+from conftest import make_report
 from handover.checks import check_report, extract_numbers
-from handover.schema import HandoverReport, Item, Unconfirmed
+from handover.schema import Contact, Fact, Item, TimelineEntry, Unconfirmed
 
 MEMO01 = """08:40 포장 2호기 라벨이 자꾸 비뚤어짐.
 09:10 센서 주변 청소하고 재가동.
@@ -7,10 +8,7 @@ MEMO01 = """08:40 포장 2호기 라벨이 자꾸 비뚤어짐.
 오후조에서 다시 확인 필요. 라벨 여분 얼마 안 남음. 수량은 못 셈."""
 
 
-def report_with(**kw):
-    fields = dict(events=[], actions=[], current_status=[], next_checks=[], unconfirmed=[])
-    fields.update(kw)
-    return HandoverReport(**fields)
+report_with = make_report
 
 
 def test_times_extracted_whole():
@@ -63,3 +61,39 @@ def test_spacing_variants_flagged():
     for text in ("라벨 문제 없음", "라벨 이상없음"):
         r = report_with(current_status=[Item(text=text, source_quote="이후 20개 확인했는데 정상.")])
         assert any("단정 표현" in w for w in check_report(r, MEMO01)), text
+
+
+def test_timeline_invented_time_flagged():
+    r = report_with(timeline=[TimelineEntry(time="10:30", text="재가동", source_quote="09:10 센서 주변 청소하고 재가동.")])
+    assert any("'10:30'" in w for w in check_report(r, MEMO01))
+
+
+def test_fact_invented_value_flagged():
+    r = report_with(key_facts=[Fact(label="라벨 여분", value="15개", source_quote="라벨 여분 얼마 안 남음.")])
+    assert any("'15'" in w for w in check_report(r, MEMO01))
+
+
+def test_contact_fake_quote_flagged():
+    r = report_with(contacts=[Contact(party="설비팀", request="점검", status="회신 없음", source_quote="설비팀에 연락함")])
+    assert any("근거 문장이 원문에 없음" in w for w in check_report(r, MEMO01))
+
+
+def test_summary_resolution_flagged():
+    r = report_with(summary="라벨 문제 해결됨")
+    assert any("'해결'" in w for w in check_report(r, MEMO01))
+
+
+def test_priority_reason_invented_number_flagged():
+    r = report_with(priority_reason="라벨 3장만 남아 긴급")
+    assert any("'3'" in w for w in check_report(r, MEMO01))
+
+
+def test_detailed_clean_report_has_no_warnings():
+    r = report_with(
+        summary="포장 2호기 라벨 비뚤어짐, 원인 미확인",
+        timeline=[TimelineEntry(time="08:40", text="라벨 비뚤어짐 발견", source_quote="08:40 포장 2호기 라벨이 자꾸 비뚤어짐.")],
+        key_facts=[Fact(label="재가동 후 확인 수량", value="20개", source_quote="이후 20개 확인했는데 정상.")],
+        contacts=[Contact(party="오후조", request="재확인", status="회신 여부 미기록", source_quote="오후조에서 다시 확인 필요.")],
+        priority="주의", priority_reason="원인이 아직 확인되지 않음",
+    )
+    assert check_report(r, MEMO01) == []

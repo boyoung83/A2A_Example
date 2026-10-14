@@ -16,3 +16,4 @@
 | 2026-10-15 | refactor: add shared generate service | 메모→보고서→점검→저장 흐름을 handover/service.py로 묶음 (CLI와 tkinter 앱이 함께 사용). GitHub 저장소(boyoung83/A2A_Example) 연결. 테스트 30개 통과 |
 | 2026-10-15 | feat: load API key from .env | API 키를 .env(ANTHROPIC_API_KEY=...)에서 읽도록 변경, .env.example 추가, .env는 git 제외. claudeapi.txt는 더 이상 사용 안 함 |
 | 2026-10-15 | feat: add tkinter desktop app | 데스크톱 앱(app.py): 메모 입력·파일/예시 불러오기, 항목별 색상 카드로 보고서 표시, 자동 점검 배너, 복사·파일 열기, 최근 보고서 목록. API 호출은 백그라운드로 실행(화면 멈춤 없음). 실제 API로 메모 01 생성 확인. 테스트 34개 통과 |
+| 2026-10-15 | feat: add priority and detailed sections to report | 보고서 상세화: 한 줄 요약·시간순 경과·주요 수치/대상·연락/요청 현황 추가, Claude가 긴급도(긴급/주의/일반)와 판단 이유를 함께 판단. 새 항목도 원문 대조 점검. 테스트 45개 통과 |
