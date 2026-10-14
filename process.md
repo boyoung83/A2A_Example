@@ -13,3 +13,4 @@
 | 2026-10-15 08:20 | `ff5ff04` feat: add CLI | 터미널 실행(붙여넣기/--file/--dir), 저장, API 키를 claudeapi.txt에서 읽기 |
 | 2026-10-15 08:23 | `61e2c62` docs: add README | 설치·실행 방법. 실제 API로 메모 20개 실행: 20개 모두 생성, 점검 항목 통과 |
 | 2026-10-15 | fix: address final review findings | 최종 검토 반영: ① 응답 형식 오류가 전체 실행을 멈추던 문제 → 해당 메모만 실패 처리 ② CP949(한글 메모장) 메모도 읽기, 못 읽는 파일은 건너뛰기 ③ 자동 점검 오탐 수정("해결 여부는 확정 아님" 같은 유보 표현은 경고 안 함, "문제 없음" 띄어쓰기 변형도 잡음). 테스트 27개 통과 |
+| 2026-10-15 | refactor: add shared generate service | 메모→보고서→점검→저장 흐름을 handover/service.py로 묶음 (CLI와 tkinter 앱이 함께 사용). GitHub 저장소(boyoung83/A2A_Example) 연결. 테스트 30개 통과 |

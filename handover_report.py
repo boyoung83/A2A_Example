@@ -8,14 +8,12 @@
 import argparse
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
-from handover.checks import check_report
 from handover.files import read_memo_file, save_report
-from handover.llm import ReportError, summarize
-from handover.render import render_report
+from handover.llm import ReportError
+from handover.service import generate
 
 KEY_FILE = Path(__file__).resolve().parent / "claudeapi.txt"
 
@@ -44,14 +42,10 @@ def read_memo_interactive(stream: TextIO) -> str:
 
 
 def process(memo: str, source_name: str, source_stem: str, out_dir: Path, client) -> Path:
-    report = summarize(memo, client)
-    warnings = check_report(report, memo)
-    now = datetime.now()
-    text = render_report(report, memo, source_name, now, warnings)
-    print(text)
-    path = save_report(text, out_dir, source_stem, now)
-    print(f"저장됨: {path}\n")
-    return path
+    result = generate(memo, source_name, source_stem, client, out_dir)
+    print(result.text)
+    print(f"저장됨: {result.path}\n")
+    return result.path
 
 
 def main(argv: list[str] | None = None, client=None) -> int:
