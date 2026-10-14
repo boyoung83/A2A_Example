@@ -1,0 +1,6 @@
+reports/
+__pycache__/
+.venv/
+.superpowers/
+.pytest_cache/
+claudeapi.txt
