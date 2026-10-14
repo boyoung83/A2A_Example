@@ -11,23 +11,12 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from handover.config import load_api_key
 from handover.files import read_memo_file, save_report
 from handover.llm import ReportError
 from handover.service import generate
 
-KEY_FILE = Path(__file__).resolve().parent / "claudeapi.txt"
-
-__all__ = ["load_api_key", "main", "read_memo_interactive", "save_report"]
-
-
-def load_api_key(env, key_file: Path) -> str | None:
-    if env.get("ANTHROPIC_API_KEY"):
-        return env["ANTHROPIC_API_KEY"]
-    if key_file.is_file():
-        for line in key_file.read_text(encoding="utf-8-sig").splitlines():
-            if line.strip():
-                return line.strip()
-    return None
+__all__ = ["main", "read_memo_interactive", "save_report"]
 
 
 def read_memo_interactive(stream: TextIO) -> str:
@@ -90,10 +79,10 @@ def main(argv: list[str] | None = None, client=None) -> int:
         return 2
 
     if client is None:
-        api_key = load_api_key(os.environ, KEY_FILE)
+        api_key = load_api_key(os.environ)
         if not api_key:
-            print("API 키가 없습니다. ANTHROPIC_API_KEY 환경변수를 설정하거나 "
-                  f"{KEY_FILE.name} 파일에 키를 넣어주세요.", file=sys.stderr)
+            print("API 키가 없습니다. .env 파일에 ANTHROPIC_API_KEY=sk-ant-... 를 넣거나 "
+                  "ANTHROPIC_API_KEY 환경변수를 설정해주세요.", file=sys.stderr)
             return 2
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)

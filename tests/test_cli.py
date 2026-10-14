@@ -2,7 +2,8 @@ import io
 from datetime import datetime
 
 from conftest import SAMPLE_REPORT, FakeClient
-from handover_report import load_api_key, main, read_memo_interactive, save_report
+from handover.config import load_api_key
+from handover_report import main, read_memo_interactive, save_report
 
 
 def test_file_mode_prints_and_saves(tmp_path, capsys):
@@ -48,19 +49,21 @@ def test_interactive_reader_stops_at_double_blank():
 
 
 def test_api_key_env_wins(tmp_path):
-    key_file = tmp_path / "claudeapi.txt"
-    key_file.write_text("sk-file", encoding="utf-8")
-    assert load_api_key({"ANTHROPIC_API_KEY": "sk-env"}, key_file) == "sk-env"
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-file", encoding="utf-8")
+    assert load_api_key({"ANTHROPIC_API_KEY": "sk-env"}, env_file) == "sk-env"
 
 
-def test_api_key_from_file(tmp_path):
-    key_file = tmp_path / "claudeapi.txt"
-    key_file.write_text("﻿\n  sk-file  \n", encoding="utf-8")
-    assert load_api_key({}, key_file) == "sk-file"
+def test_api_key_from_dotenv(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text('﻿# 주석\nOTHER=1\nexport ANTHROPIC_API_KEY = "sk-file"  \n', encoding="utf-8")
+    assert load_api_key({}, env_file) == "sk-file"
 
 
 def test_api_key_missing(tmp_path):
-    assert load_api_key({}, tmp_path / "claudeapi.txt") is None
+    (tmp_path / ".env").write_text("OTHER=1\n", encoding="utf-8")
+    assert load_api_key({}, tmp_path / ".env") is None
+    assert load_api_key({}, tmp_path / "없음.env") is None
 
 
 def test_dir_reads_cp949_and_skips_undecodable(tmp_path):

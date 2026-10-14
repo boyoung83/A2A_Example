@@ -12,11 +12,13 @@ Python 3.10 이상이 필요합니다.
 
 ## 2. API 키 설정
 
-둘 중 하나를 사용합니다. 환경변수가 있으면 환경변수를 우선합니다.
+`.env.example`을 `.env`로 복사하고 키를 넣습니다. `.env`는 `.gitignore`에 들어 있어 git에 올라가지 않습니다.
 
-- **파일:** 이 폴더의 `claudeapi.txt` 첫 줄에 키를 넣습니다. (git에 올라가지 않도록 `.gitignore`에 들어 있습니다)
-- **환경변수 (PowerShell):** `$env:ANTHROPIC_API_KEY="sk-ant-..."`
-  영구 설정은 `setx ANTHROPIC_API_KEY "sk-ant-..."` 후 새 창을 엽니다.
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+`ANTHROPIC_API_KEY` 환경변수가 설정되어 있으면 `.env`보다 우선합니다.
 
 ## 3. 실행
 
