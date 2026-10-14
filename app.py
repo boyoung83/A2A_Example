@@ -117,13 +117,14 @@ class Card(tk.Frame):
 def card_header(card, fonts: Fonts, title: str, subtitle: str):
     head = tk.Frame(card, bg=SURFACE)
     head.pack(fill="x", padx=20, pady=(18, 12))
+    # 버튼 영역을 먼저 배치해야 창이 좁아져도 버튼이 잘리지 않는다 (pack은 먼저 넣은 것에 공간을 먼저 준다)
+    actions = tk.Frame(head, bg=SURFACE)
+    actions.pack(side="right", anchor="n")
     text = tk.Frame(head, bg=SURFACE)
     text.pack(side="left", fill="x", expand=True)
     tk.Label(text, text=title, bg=SURFACE, fg=TEXT, font=fonts.title).pack(anchor="w")
     sub = tk.Label(text, text=subtitle, bg=SURFACE, fg=MUTED, font=fonts.small, anchor="w", justify="left")
     sub.pack(anchor="w", pady=(2, 0))
-    actions = tk.Frame(head, bg=SURFACE)
-    actions.pack(side="right")
     return sub, actions
 
 
@@ -247,10 +248,10 @@ class ReportView(Card):
         self.banner_body.configure(bg=bg)
         self.banner_icon.configure(text=icon, bg=bg, fg=fg)
         tk.Label(self.banner_body, text=title, bg=bg, fg=fg, font=self.fonts.body_bold, anchor="w",
-                 justify="left").pack(fill="x")
+                 justify="left", wraplength=420).pack(fill="x")
         for line in lines or []:
             tk.Label(self.banner_body, text=f"• {line}", bg=bg, fg=fg, font=self.fonts.small,
-                     anchor="w", justify="left", wraplength=640).pack(fill="x", pady=(2, 0))
+                     anchor="w", justify="left", wraplength=420).pack(fill="x", pady=(2, 0))
         self.banner.pack(in_=self.banner_anchor, fill="x", pady=(0, 4))
         self.banner.lift(self.banner_anchor)  # anchor보다 나중에 그려야 가려지지 않는다
 
@@ -399,7 +400,7 @@ class HandoverApp:
         self._views["dashboard"] = self._build_dashboard_tab(self.body)
         self.refresh_history()
         self.refresh_dashboard()
-        self.show_tab("editor")
+        self.show_tab("dashboard")  # 첫 화면은 대시보드
 
     # ---- 공통 레이아웃 ------------------------------------------------------------
     def _setup_root(self):
@@ -443,7 +444,7 @@ class HandoverApp:
 
         tabs = tk.Frame(header, bg=HEADER_RAISED, padx=4, pady=4)
         tabs.pack(side="left", padx=40)
-        for key, label in (("editor", "메모 작성"), ("dashboard", "대시보드")):
+        for key, label in (("dashboard", "대시보드"), ("editor", "메모 작성")):
             tab = tk.Label(tabs, text=label, font=f.body_bold, padx=18, pady=6, cursor="hand2")
             tab.pack(side="left")
             tab.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
@@ -464,6 +465,7 @@ class HandoverApp:
         tk.Label(pill, text=f"  ·  {MODEL}", bg=HEADER_RAISED, fg=HEADER_MUTED, font=f.small).pack(side="left")
 
     def show_tab(self, name: str):
+        self.current_tab = name
         for key, view in self._views.items():
             view.pack_forget()
             active = key == name
@@ -686,8 +688,8 @@ class HandoverApp:
         columns = ("priority", "memo", "summary", "unconfirmed", "warnings", "time")
         self.tree = ttk.Treeview(box, columns=columns, show="headings", style="Dash.Treeview", selectmode="browse")
         for col, heading, width, anchor, stretch in (
-                ("priority", "긴급도", 80, "center", False), ("memo", "메모", 170, "w", False),
-                ("summary", "요약", 300, "w", True), ("unconfirmed", "미확인", 64, "center", False),
+                ("priority", "긴급도", 76, "center", False), ("memo", "메모", 150, "w", False),
+                ("summary", "요약", 160, "w", True), ("unconfirmed", "미확인", 64, "center", False),
                 ("warnings", "경고", 56, "center", False), ("time", "처리 시각", 100, "center", False)):
             self.tree.heading(col, text=heading, anchor=anchor)
             self.tree.column(col, width=width, anchor=anchor, stretch=stretch)
@@ -708,7 +710,8 @@ class HandoverApp:
 
     def _update_folder_label(self):
         count = len(find_memos(self.batch_folder)) if self.batch_folder.is_dir() else 0
-        self.folder_label.configure(text=f"메모 폴더: {self.batch_folder}  ·  .txt {count}건")
+        short = "\\".join(self.batch_folder.parts[-2:])
+        self.folder_label.configure(text=f"메모 폴더: …\\{short}  ·  .txt {count}건")
 
     def _choose_batch_folder(self):
         folder = filedialog.askdirectory(title="메모 폴더 선택", initialdir=self.batch_folder)

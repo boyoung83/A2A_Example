@@ -85,6 +85,11 @@ def test_app_shows_error_on_failure(root, tmp_path):
     assert not (tmp_path / "reports").exists() or not list((tmp_path / "reports").iterdir())
 
 
+def test_app_starts_on_dashboard(root, tmp_path):
+    app = make_app(root, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+    assert app.current_tab == "dashboard"
+
+
 def write_memos(folder, names):
     for name in names:
         (folder / f"{name}.txt").write_text(f"{name} 메모", encoding="utf-8")
