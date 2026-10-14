@@ -1,0 +1,73 @@
+"""처리 결과(.json)를 보고서(.txt) 옆에 저장하고 대시보드용으로 다시 읽는다."""
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+import pydantic
+
+from handover.schema import PRIORITY_ORDER, HandoverReport
+
+
+@dataclass
+class Record:
+    source_name: str
+    created_at: datetime
+    memo_hash: str
+    memo: str
+    report: HandoverReport
+    warnings: list[str]
+    txt_path: Path
+
+
+def content_hash(memo: str) -> str:
+    return hashlib.sha256(" ".join(memo.split()).encode("utf-8")).hexdigest()
+
+
+def save_record(record: Record) -> Path:
+    path = record.txt_path.with_suffix(".json")
+    data = {
+        "source_name": record.source_name,
+        "created_at": record.created_at.isoformat(),
+        "memo_hash": record.memo_hash,
+        "memo": record.memo,
+        "report": record.report.model_dump(),
+        "warnings": record.warnings,
+        "txt_file": record.txt_path.name,
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _load(path: Path) -> Record | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return Record(
+            source_name=data["source_name"],
+            created_at=datetime.fromisoformat(data["created_at"]),
+            memo_hash=data["memo_hash"],
+            memo=data["memo"],
+            report=HandoverReport.model_validate(data["report"]),
+            warnings=list(data["warnings"]),
+            txt_path=path.with_name(data["txt_file"]),
+        )
+    except (OSError, ValueError, KeyError, TypeError, pydantic.ValidationError):
+        return None  # 이전 형식이거나 손상된 파일은 대시보드에서 제외
+
+
+def load_records(out_dir: Path) -> list[Record]:
+    if not out_dir.is_dir():
+        return []
+    latest: dict[str, Record] = {}
+    for path in out_dir.glob("*.json"):
+        record = _load(path)
+        if record and (record.source_name not in latest
+                       or record.created_at > latest[record.source_name].created_at):
+            latest[record.source_name] = record
+    return list(latest.values())
+
+
+def sort_for_dashboard(records: list[Record]) -> list[Record]:
+    newest_first = sorted(records, key=lambda r: r.created_at, reverse=True)
+    return sorted(newest_first, key=lambda r: PRIORITY_ORDER.index(r.report.priority))

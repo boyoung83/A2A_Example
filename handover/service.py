@@ -8,6 +8,7 @@ from handover.files import save_report
 from handover.llm import summarize
 from handover.render import render_report
 from handover.schema import HandoverReport
+from handover.store import Record, content_hash, save_record
 
 
 @dataclass
@@ -16,6 +17,7 @@ class GenerationResult:
     warnings: list[str]
     text: str
     path: Path
+    record: Record
 
 
 def generate(memo: str, source_name: str, source_stem: str, client, out_dir: Path,
@@ -25,4 +27,6 @@ def generate(memo: str, source_name: str, source_stem: str, client, out_dir: Pat
     now = now or datetime.now()
     text = render_report(report, memo, source_name, now, warnings)
     path = save_report(text, out_dir, source_stem, now)
-    return GenerationResult(report, warnings, text, path)
+    record = Record(source_name, now, content_hash(memo), memo, report, warnings, path)
+    save_record(record)
+    return GenerationResult(report, warnings, text, path, record)
