@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from handover.batch import find_memos, run_batch
 from handover.config import load_api_key
+from handover.export import export_workbook
 from handover.files import read_memo_file
 from handover.classify import classify_missing
 from handover.insights import extract_insights, load_insights, save_insights
@@ -656,6 +657,7 @@ class HandoverApp:
                        activebackground=SURFACE, selectcolor=SURFACE, font=f.body, bd=0,
                        highlightthickness=0, cursor="hand2").pack(side="right", padx=(12, 0))
         Button(actions, "폴더 변경", self._choose_batch_folder, font=f.body).pack(side="right")
+        Button(actions, "엑셀로 내보내기", self._choose_export_path, font=f.body).pack(side="right", padx=(0, 12))
         progress_row = tk.Frame(toolbar, bg=SURFACE)
         self.progress_row = progress_row  # 일괄 처리를 시작하면 표시
         self.batch_progress = ttk.Progressbar(progress_row, mode="determinate", length=260,
@@ -1056,6 +1058,40 @@ class HandoverApp:
         count = len(find_memos(self.batch_folder)) if self.batch_folder.is_dir() else 0
         short = "\\".join(self.batch_folder.parts[-2:])
         self.folder_label.configure(text=f"메모 폴더: …\\{short}  ·  .txt {count}건")
+
+    # ---- 엑셀 내보내기 ---------------------------------------------------------------
+    def _choose_export_path(self):
+        if not self._all_records:
+            self.export_excel(None)
+            return
+        path = filedialog.asksaveasfilename(
+            title="엑셀로 내보내기", initialdir=self.out_dir, defaultextension=".xlsx",
+            initialfile=f"인수인계_대시보드_{datetime.now():%Y%m%d_%H%M}.xlsx", filetypes=[("Excel 파일", "*.xlsx")])
+        if path and self.export_excel(Path(path)) and messagebox.askyesno("내보내기 완료", f"{Path(path).name}\n\n파일을 열까요?"):
+            _open_path(Path(path))
+
+    def export_excel(self, path: Path | None) -> Path | None:
+        """대시보드·처리현황·상세보고서·AI 인사이트·자동점검경고를 엑셀로 저장 (필터와 상관없이 전체)."""
+        records = load_records(self.out_dir)
+        if not records:
+            self.batch_status.configure(text="내보낼 보고서가 없습니다 — 먼저 ‘전체 처리’를 실행하세요", fg="#B91C1C")
+            self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
+            return None
+        try:
+            saved = export_workbook(records, self._insight_snapshot, path)
+        except PermissionError:
+            self.batch_status.configure(text="엑셀 파일이 열려 있어 저장하지 못했습니다 — 파일을 닫고 다시 시도하세요",
+                                        fg="#B91C1C")
+            self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
+            return None
+        except OSError as e:
+            self.batch_status.configure(text=f"엑셀로 저장하지 못했습니다 — {e}", fg="#B91C1C")
+            self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
+            return None
+        self.batch_status.configure(text=f"엑셀로 내보냈습니다: {saved.name} (보고서 {len(records)}건, 시트 5개)",
+                                    fg="#047857")
+        self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
+        return saved
 
     def _choose_batch_folder(self):
         folder = filedialog.askdirectory(title="메모 폴더 선택", initialdir=self.batch_folder)

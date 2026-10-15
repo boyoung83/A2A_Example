@@ -90,6 +90,24 @@ def test_unclassified_records_are_classified_before_insights(root, tmp_path):
         window.destroy()
 
 
+def test_export_excel_writes_all_sheets(root, tmp_path):
+    import openpyxl
+    app = three_priority_app(root, tmp_path)
+    app.click_tile("긴급")  # 필터와 상관없이 전체를 내보낸다
+    path = app.export_excel(tmp_path / "out.xlsx")
+    wb = openpyxl.load_workbook(path)
+    assert wb.sheetnames[:2] == ["대시보드", "처리현황"]
+    assert wb["처리현황"].max_row == 4
+    assert "엑셀로 내보냈습니다" in app.batch_status_text()
+
+
+def test_export_excel_without_records(root, tmp_path):
+    app = make_app(root, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+    assert app.export_excel(tmp_path / "out.xlsx") is None
+    assert "내보낼 보고서가 없습니다" in app.batch_status_text()
+    assert not (tmp_path / "out.xlsx").exists()
+
+
 def test_build_sections_detail_formats():
     r = make_report(
         timeline=[TimelineEntry(time="14:10", text="진동 발생", source_quote="q")],
