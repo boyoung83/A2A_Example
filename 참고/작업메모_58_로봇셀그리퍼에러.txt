@@ -1,0 +1,3 @@
+14:30 Robot cell #2 gripper error E-204 발생.
+Reset 후 재가동, 이후 20 cycles OK.
+Vendor 연락은 안 함. 원인 unknown.
