@@ -93,7 +93,20 @@ python handover_report.py --file 메모.txt --out 보고서
 
 `참고/`에 메모 60건이 있습니다(01~20 실습 자료, 21~60 검증용). 21~60번의 예상 긴급도와 확인할 점은 [docs/검증/샘플메모_예상결과.md](docs/검증/샘플메모_예상결과.md)에 있습니다.
 
-## 6. 테스트
+## 6. 다른 PC에서 실행 (실행 파일)
+
+Python이 없는 Windows PC에서는 배포용 zip(`HandoverReport.exe` + 메모 60건 + 예시 결과)을 풀고 `사용법.txt`를 따르면 됩니다. API 키(`.env`)는 zip에 들어 있지 않으므로 `.env.example`을 `.env`로 복사해 키를 넣습니다.
+
+실행 파일 다시 만들기:
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller app.py --name HandoverReport --windowed --onedir --collect-submodules handover
+```
+
+`dist\HandoverReport\` 옆에 `참고\`, `reports\`, `.env.example`을 두면 됩니다. 실행 파일은 자기 폴더의 `.env`·`참고`·`reports`를 사용합니다.
+
+## 7. 테스트
 
 ```powershell
 python -m pytest

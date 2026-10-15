@@ -20,13 +20,14 @@ from handover.files import read_memo_file
 from handover.classify import classify_missing
 from handover.insights import extract_insights, load_insights, save_insights
 from handover.llm import MODEL, ReportError
+from handover.paths import base_dir
 from handover.schema import PRIORITY_ORDER, UNCLASSIFIED, HandoverReport
 from handover.service import generate
 from handover.store import Record, load_records, sort_for_dashboard
 from handover.view import (EMPTY, NOT_A_PROBLEM, OTHER, PIE_TYPES, build_sections, other_breakdown, pie_groups,
                            unconfirmed_ranking)
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = base_dir()  # exe로 묶으면 exe 폴더
 
 # ---- 디자인 토큰 -------------------------------------------------------------
 BG = "#F3F5F9"

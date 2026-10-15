@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 claudeapi.txt
 .env
+배포/
