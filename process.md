@@ -30,3 +30,4 @@
 | 2026-10-15 | docs: add UI screenshots to README | README에 화면 스크린샷 3장(대시보드, 긴급 필터, 메모 작성) 추가하고 대시보드·필터·인사이트·검증용 샘플 사용법으로 내용 갱신 |
 | 2026-10-15 | feat: export dashboard to Excel | 대시보드에 '엑셀로 내보내기' 버튼 추가: 대시보드(요약·인사이트·문제 유형 원형 차트·미확인 막대 차트), 처리현황(긴급도 색·필터), 상세보고서(항목별 한 행, 근거 문장 포함), AI인사이트, 자동점검경고 5개 시트. 필터와 상관없이 전체를 내보냄. 실제 61건으로 생성 확인. 테스트 99개 통과 |
 | 2026-10-15 | build: standalone exe and distribution zip | 실행 파일(.exe)로 묶었을 때 .env·참고·reports를 exe 폴더에서 찾도록 수정. PyInstaller로 HandoverReport.exe 빌드, 메모 60건·예시 결과·사용법과 함께 배포/교대인수인계_배포.zip(42.7MB) 생성(API 키 미포함 확인, git 제외). README에 다른 PC 실행 방법 추가. 테스트 101개 통과 |
+| 2026-10-15 | build: shrink distribution zip under 20MB, add --selftest | 배포 zip을 42.7MB → 19.6MB로 축소(쓰지 않는 numpy·Pillow·pydantic.v1·테스트 도구 등 제외, Tcl 시간대·번역 데이터와 Windows 기본 런타임 DLL 제거). 실행 파일 점검 옵션 --selftest 추가(anthropic·openpyxl·SSL·tkinter·엑셀 생성 확인). 사용자 요청으로 zip에 실제 .env 포함(git에는 미포함). 테스트 102개 통과 |

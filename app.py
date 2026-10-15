@@ -1352,6 +1352,9 @@ def _make_client():
 
 
 def main():
+    if "--selftest" in sys.argv:  # 실행 파일 점검 (창을 띄우지 않음)
+        from handover.selftest import run_selftest
+        sys.exit(0 if run_selftest(BASE_DIR / "selftest.txt") else 1)
     if sys.platform == "win32":
         try:
             import ctypes

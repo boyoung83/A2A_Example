@@ -101,10 +101,14 @@ Python이 없는 Windows PC에서는 배포용 zip(`HandoverReport.exe` + 메모
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller app.py --name HandoverReport --windowed --onedir --collect-submodules handover
+python -m PyInstaller app.py --name HandoverReport --windowed --onedir --collect-submodules handover `
+  --exclude-module numpy --exclude-module PIL --exclude-module pytest --exclude-module tzdata `
+  --exclude-module pydantic.v1 --exclude-module unittest --exclude-module pydoc --exclude-module sqlite3
 ```
 
-`dist\HandoverReport\` 옆에 `참고\`, `reports\`, `.env.example`을 두면 됩니다. 실행 파일은 자기 폴더의 `.env`·`참고`·`reports`를 사용합니다.
+- 쓰지 않는 라이브러리(numpy·Pillow 등, openpyxl이 선택적으로 불러옴)를 빼야 zip이 20MB 아래로 줄어듭니다. `anthropic.lib.bedrock/vertex/foundry`는 anthropic이 시작할 때 불러오므로 빼면 안 됩니다.
+- `dist\HandoverReport\` 옆에 `참고\`, `reports\`, `.env`를 두면 됩니다. 실행 파일은 자기 폴더의 `.env`·`참고`·`reports`를 사용합니다.
+- 점검: `HandoverReport.exe --selftest`를 실행하면 같은 폴더에 `selftest.txt`가 생기고, 필요한 구성 요소가 모두 들어 있는지(API 호출 없이) 확인합니다.
 
 ## 7. 테스트
 
