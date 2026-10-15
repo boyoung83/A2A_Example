@@ -59,12 +59,16 @@ def _load(path: Path) -> Record | None:
 def load_records(out_dir: Path) -> list[Record]:
     if not out_dir.is_dir():
         return []
-    latest: dict[str, Record] = {}
+    # 같은 메모(이름과 내용이 모두 같음)를 다시 처리한 경우만 최신 1건으로 합친다.
+    # 이름만 같은 경우(예: 직접 입력한 메모 여러 건)는 서로 다른 건으로 둔다.
+    latest: dict[tuple[str, str], Record] = {}
     for path in out_dir.glob("*.json"):
         record = _load(path)
-        if record and (record.source_name not in latest
-                       or record.created_at > latest[record.source_name].created_at):
-            latest[record.source_name] = record
+        if record is None:
+            continue
+        key = (record.source_name, record.memo_hash)
+        if key not in latest or record.created_at > latest[key].created_at:
+            latest[key] = record
     return list(latest.values())
 
 

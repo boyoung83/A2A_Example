@@ -4,6 +4,7 @@ import pytest
 
 from conftest import SAMPLE_REPORT, FakeClient, make_report
 from handover.schema import Contact, Fact, TimelineEntry, Unconfirmed
+from handover.insights import InsightPoint, Insights
 from handover.view import build_sections
 
 
@@ -90,6 +91,29 @@ def test_app_starts_on_dashboard(root, tmp_path):
     assert app.current_tab == "dashboard"
 
 
+def test_single_report_syncs_to_dashboard(root, tmp_path):
+    write_memos(tmp_path, ["a", "b"])
+    fake = FakeClient("end_turn", SAMPLE_REPORT)
+    app = make_app(root, tmp_path, fake)
+    app.run_batch(); app.poll_results()
+    assert app.tile_counts()["전체"] == 2
+    app.show_tab("editor")
+    app.load_memo_text("08:40 라벨 비뚤어짐.", "직접 입력")
+    app.generate(); app.poll_results()
+    app.show_tab("dashboard")
+    assert app.tile_counts()["전체"] == 3
+    assert "직접 입력" in [r[1] for r in app.dashboard_rows()]
+
+
+def test_typed_memos_are_not_merged_on_dashboard(root, tmp_path):
+    app = make_app(root, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+    for memo in ("08:40 라벨 비뚤어짐.", "09:10 센서 청소 후 재가동."):
+        app.clear_memo()
+        app.memo.insert("1.0", memo)
+        app.generate(); app.poll_results()
+    assert app.tile_counts()["전체"] == 2
+
+
 def write_memos(folder, names):
     for name in names:
         (folder / f"{name}.txt").write_text(f"{name} 메모", encoding="utf-8")
@@ -157,5 +181,50 @@ def test_dashboard_loads_existing_records_on_start(root, tmp_path):
     try:
         again = make_app(window, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
         assert len(again.dashboard_rows()) == 1
+    finally:
+        window.destroy()
+
+
+INSIGHTS = Insights(headline="설비 이상 건이 회신 대기 중", patterns=[], risks=[],
+                    gaps=[InsightPoint(title="원인 미기록", detail="원인이 반복 미확인", related=["a.txt"])])
+
+
+def test_batch_then_insights_shown(root, tmp_path):
+    write_memos(tmp_path, ["a", "b"])
+    fake = FakeClient(results=[("end_turn", SAMPLE_REPORT), ("end_turn", SAMPLE_REPORT)], insights=INSIGHTS)
+    app = make_app(root, tmp_path, fake)
+    app.run_batch()
+    app.poll_results()   # 일괄 처리 완료 → 인사이트 분석 시작
+    app.poll_results()   # 인사이트 결과 반영
+    text = app.insights_text()
+    assert "설비 이상 건이 회신 대기 중" in text and "원인 미기록" in text
+    assert (tmp_path / "reports" / "insights.json").is_file()
+
+
+def test_insights_without_records(root, tmp_path):
+    fake = FakeClient("end_turn", INSIGHTS)
+    app = make_app(root, tmp_path, fake)
+    app.run_insights()
+    assert "처리된 보고서가 없습니다" in app.insights_text()
+    assert fake.insight_calls == []
+
+
+def test_saved_insights_loaded_and_marked_stale(root, tmp_path):
+    write_memos(tmp_path, ["a"])
+    fake = FakeClient(results=[("end_turn", SAMPLE_REPORT)], insights=INSIGHTS)
+    app = make_app(root, tmp_path, fake)
+    app.run_batch(); app.poll_results(); app.poll_results()
+    assert "다시 분석하세요" not in app.insights_text()
+
+    # 분석 이후 보고서가 하나 더 생김 → 저장된 인사이트는 보이되 '오래됨' 표시
+    from datetime import datetime
+    from handover.store import Record, save_record
+    save_record(Record("b.txt", datetime(2026, 10, 15, 12, 0), "hb", "m", make_report(),
+                       [], tmp_path / "reports" / "인수인계_b_20261015_120000.txt"))
+    window = tk.Toplevel(root)
+    try:
+        again = make_app(window, tmp_path, FakeClient("end_turn", INSIGHTS))
+        text = again.insights_text()
+        assert "설비 이상 건이 회신 대기 중" in text and "다시 분석하세요" in text
     finally:
         window.destroy()

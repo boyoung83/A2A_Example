@@ -1,4 +1,6 @@
-"""Claude API 호출: 메모 → HandoverReport."""
+"""Claude API 호출: 구조화된 응답을 받아 Pydantic 모델로 돌려준다."""
+from typing import TypeVar
+
 import anthropic
 import pydantic
 
@@ -7,12 +9,14 @@ from handover.schema import HandoverReport
 
 MODEL = "claude-opus-5-5"
 
+T = TypeVar("T", bound=pydantic.BaseModel)
+
 
 class ReportError(Exception):
     """보고서를 만들지 못했을 때 사용자에게 보여줄 오류."""
 
 
-def summarize(memo: str, client) -> HandoverReport:
+def call_structured(client, system: str, user_content: str, output_format: type[T]) -> T:
     try:
         response = client.beta.messages.parse(
             model=MODEL,
@@ -20,9 +24,9 @@ def summarize(memo: str, client) -> HandoverReport:
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
             output_config={"effort": "medium"},
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_user_message(memo)}],
-            output_format=HandoverReport,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+            output_format=output_format,
         )
     except anthropic.AuthenticationError as e:
         raise ReportError("API 키가 올바르지 않습니다") from e
@@ -40,3 +44,7 @@ def summarize(memo: str, client) -> HandoverReport:
     if response.parsed_output is None:
         raise ReportError("응답 형식을 해석하지 못했습니다")
     return response.parsed_output
+
+
+def summarize(memo: str, client) -> HandoverReport:
+    return call_structured(client, SYSTEM_PROMPT, build_user_message(memo), HandoverReport)

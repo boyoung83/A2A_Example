@@ -25,6 +25,14 @@ def test_load_keeps_latest_per_source(tmp_path):
     assert load_records(tmp_path) == [newer]
 
 
+def test_load_keeps_same_name_with_different_content(tmp_path):
+    first = record(tmp_path, "직접 입력", when=datetime(2026, 10, 15, 9, 0), stem="r1")
+    second = record(tmp_path, "직접 입력", when=datetime(2026, 10, 15, 10, 0), stem="r2")
+    second.memo_hash = content_hash("다른 메모")
+    save_record(first); save_record(second)
+    assert len(load_records(tmp_path)) == 2
+
+
 def test_load_skips_old_or_broken_json(tmp_path):
     (tmp_path / "old.json").write_text('{"foo": 1}', encoding="utf-8")
     (tmp_path / "broken.json").write_text("{", encoding="utf-8")

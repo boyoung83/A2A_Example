@@ -9,12 +9,14 @@ import sys
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from handover.batch import find_memos, run_batch
 from handover.config import load_api_key
 from handover.files import read_memo_file
+from handover.insights import extract_insights, load_insights, save_insights
 from handover.llm import MODEL, ReportError
 from handover.schema import HandoverReport
 from handover.service import generate
@@ -385,6 +387,9 @@ class HandoverApp:
         self._batch_total = 0
         self._batch_done = 0
         self._batch_failed: list[str] = []
+        self._insights_busy = False
+        self._insight_snapshot = load_insights(self.out_dir)
+        self._insight_message: tuple[str, str] | None = None  # (종류, 문구) — 분석 중/오류/안내
         self._client = None
         self._client_lock = threading.Lock()
         self._source_name = "직접 입력"
@@ -648,7 +653,7 @@ class HandoverApp:
                        highlightthickness=0, cursor="hand2").pack(side="right", padx=(12, 0))
         Button(actions, "폴더 변경", self._choose_batch_folder, font=f.body).pack(side="right")
         progress_row = tk.Frame(toolbar, bg=SURFACE)
-        progress_row.pack(fill="x", padx=20, pady=(0, 16))
+        self.progress_row = progress_row  # 일괄 처리를 시작하면 표시
         self.batch_progress = ttk.Progressbar(progress_row, mode="determinate", length=260,
                                               style="Accent.Horizontal.TProgressbar")
         self.batch_progress.pack(side="left")
@@ -657,7 +662,7 @@ class HandoverApp:
         self.batch_status.pack(side="left", padx=12, fill="x", expand=True)
 
         tiles = tk.Frame(view, bg=BG)
-        tiles.pack(fill="x", pady=16)
+        tiles.pack(fill="x", pady=12)
         self._tile_values: dict[str, tk.Label] = {}
         tile_specs = [("전체", TEXT, "처리된 메모"), ("긴급", PRIORITY_COLORS["긴급"][0], "교대 직후 바로 조치"),
                       ("주의", PRIORITY_COLORS["주의"][0], "근무 중 확인 필요"),
@@ -668,11 +673,13 @@ class HandoverApp:
             tile = Card(tiles)
             tile.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 12, 0))
             tk.Frame(tile, bg=color, height=3).pack(fill="x")
-            tk.Label(tile, text=key, bg=SURFACE, fg=MUTED, font=f.small_bold).pack(anchor="w", padx=16, pady=(12, 0))
+            tk.Label(tile, text=key, bg=SURFACE, fg=MUTED, font=f.small_bold).pack(anchor="w", padx=16, pady=(8, 0))
             value = tk.Label(tile, text="0", bg=SURFACE, fg=color, font=f.stat)
             value.pack(anchor="w", padx=16)
-            tk.Label(tile, text=hint, bg=SURFACE, fg=FAINT, font=f.small).pack(anchor="w", padx=16, pady=(0, 12))
+            tk.Label(tile, text=hint, bg=SURFACE, fg=FAINT, font=f.small).pack(anchor="w", padx=16, pady=(0, 8))
             self._tile_values[key] = value
+
+        self._build_insights_card(view)
 
         main = tk.Frame(view, bg=BG)
         main.pack(fill="both", expand=True)
@@ -708,6 +715,136 @@ class HandoverApp:
         self.detail_view.grid(row=0, column=1, sticky="nsew")
         return view
 
+    # ---- AI 인사이트 ----------------------------------------------------------------
+    INSIGHT_COLUMNS = (("patterns", "공통 패턴", "#2563EB"), ("risks", "주의할 경향", "#DC2626"),
+                       ("gaps", "기록 보완점", "#D97706"))
+
+    def _build_insights_card(self, parent):
+        f = self.fonts
+        card = Card(parent)
+        card.pack(fill="x", pady=(0, 12))
+        top = tk.Frame(card, bg=SURFACE)
+        top.pack(fill="x", padx=20, pady=(14, 6))
+        self.insights_button = Button(top, "다시 분석", self.run_insights, font=f.body)
+        self.insights_button.pack(side="right")
+        self._insights_expanded = False
+        self.insights_toggle = Button(top, "자세히 보기", self._toggle_insights, kind="ghost", font=f.body)
+        self.insights_toggle.pack(side="right", padx=(0, 8))
+        tk.Label(top, text="✦", bg=SURFACE, fg="#7C3AED", font=f.title).pack(side="left")
+        tk.Label(top, text=" AI 인사이트", bg=SURFACE, fg=TEXT, font=f.title).pack(side="left")
+        self.insights_meta = tk.Label(top, text="", bg=SURFACE, fg=MUTED, font=f.small)
+        self.insights_meta.pack(side="left", padx=12)
+        self.insights_body = tk.Frame(card, bg=SURFACE)
+        self.insights_body.pack(fill="x", padx=20, pady=(0, 14))
+        self._insight_labels: list[tk.Label] = []
+
+    def _insight_label(self, parent, text, **kw) -> tk.Label:
+        kw.setdefault("bg", parent["bg"])
+        label = tk.Label(parent, text=text, anchor="w", justify="left", **kw)
+        self._insight_labels.append(label)
+        return label
+
+    def _render_insights(self):
+        f = self.fonts
+        for child in self.insights_body.winfo_children():
+            child.destroy()
+        self._insight_labels = []
+        snap = self._insight_snapshot
+        stale = snap is not None and not snap.is_current(self._records)
+        if snap:
+            meta = f"보고서 {snap.source_count}건 기준 · {snap.created_at:%m/%d %H:%M} 분석"
+            if stale:
+                meta += "  ·  이후 보고서가 바뀌었습니다 — 다시 분석하세요"
+            self.insights_meta.configure(text=meta, fg="#B45309" if stale else MUTED)
+        else:
+            self.insights_meta.configure(text="", fg=MUTED)
+
+        if self._insight_message:
+            kind, message = self._insight_message
+            color = {"loading": PRIMARY, "error": "#B91C1C", "info": MUTED}[kind]
+            self._insight_label(self.insights_body, message, fg=color, font=f.body).pack(fill="x", pady=(0, 6))
+        if snap is None:
+            if not self._insight_message:
+                self._insight_label(self.insights_body, "아직 분석한 인사이트가 없습니다. ‘전체 처리’로 보고서를 만들면 "
+                                    "Claude가 여러 보고서의 공통점과 주의할 경향을 자동으로 정리합니다.",
+                                    fg=FAINT, font=f.body).pack(fill="x")
+            return
+
+        self._insight_label(self.insights_body, snap.insights.headline, fg=TEXT, font=f.hero,
+                            wraplength=1100).pack(fill="x", pady=(0, 10))
+        cols = tk.Frame(self.insights_body, bg=SURFACE)
+        cols.pack(fill="x")
+        for i, (key, title, color) in enumerate(self.INSIGHT_COLUMNS):
+            cols.columnconfigure(i, weight=1, uniform="ins")
+            col = tk.Frame(cols, bg=SUBTLE, highlightthickness=1, highlightbackground=BORDER)
+            col.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 12, 0))
+            head = tk.Frame(col, bg=SUBTLE)
+            head.pack(fill="x", padx=12, pady=(10, 4))
+            tk.Frame(head, bg=color, width=8, height=8).pack(side="left", padx=(0, 6))
+            self._insight_label(head, title, fg=TEXT, font=f.body_bold).pack(side="left")
+            points = getattr(snap.insights, key)
+            shown = points if self._insights_expanded else points[:3]
+            if not points:
+                self._insight_label(col, "해당 없음", fg=FAINT, font=f.small).pack(fill="x", padx=12, pady=(0, 10))
+            for point in shown:
+                self._insight_label(col, f"• {point.title}", fg=color, font=f.small_bold,
+                                    wraplength=330).pack(fill="x", padx=12, pady=(4, 0))
+                if not self._insights_expanded:
+                    continue
+                self._insight_label(col, point.detail, fg=TEXT, font=f.small, wraplength=330).pack(fill="x", padx=12)
+                if point.related:
+                    related = ", ".join(Path(n).stem.replace("작업메모_", "") for n in point.related)
+                    self._insight_label(col, f"관련: {related}", fg=FAINT, font=f.small,
+                                        wraplength=330).pack(fill="x", padx=12)
+            if len(points) > len(shown):
+                self._insight_label(col, f"외 {len(points) - len(shown)}건", fg=FAINT, font=f.small).pack(fill="x", padx=12)
+            tk.Frame(col, bg=SUBTLE, height=8).pack(fill="x")
+
+    def _toggle_insights(self):
+        self._insights_expanded = not self._insights_expanded
+        self.insights_toggle.configure(text="접기" if self._insights_expanded else "자세히 보기")
+        self._render_insights()
+
+    def insights_text(self) -> str:
+        return "\n".join(label.cget("text") for label in self._insight_labels
+                         if label.winfo_exists()) + "\n" + self.insights_meta.cget("text")
+
+    def run_insights(self):
+        if self._insights_busy:
+            return
+        records = load_records(self.out_dir)
+        if not records:
+            self._insight_message = ("info", "처리된 보고서가 없습니다 — 먼저 ‘전체 처리’를 실행하세요")
+            self._render_insights()
+            return
+        self._insights_busy = True
+        self.insights_button.set_enabled(False)
+        self._insight_message = ("loading", f"Claude가 보고서 {len(records)}건의 공통점과 경향을 분석하고 있습니다…")
+        self._render_insights()
+
+        def job():
+            try:
+                insights = extract_insights(records, self._get_client())
+                save_insights(self.out_dir, insights, records, datetime.now())
+                self._results.put(("insights_ok", None))
+            except ReportError as e:
+                self._results.put(("insights_error", str(e)))
+            except OSError as e:
+                self._results.put(("insights_error", f"분석 결과를 저장하지 못했습니다: {e}"))
+
+        self.runner(job)
+        self.root.after(100, self._poll_loop)
+
+    def _finish_insights(self, kind, payload):
+        self._insights_busy = False
+        self.insights_button.set_enabled(True)
+        if kind == "insights_ok":
+            self._insight_snapshot = load_insights(self.out_dir)
+            self._insight_message = None
+        else:
+            self._insight_message = ("error", f"인사이트를 분석하지 못했습니다 — {payload}")
+        self._render_insights()
+
     def _update_folder_label(self):
         count = len(find_memos(self.batch_folder)) if self.batch_folder.is_dir() else 0
         short = "\\".join(self.batch_folder.parts[-2:])
@@ -728,10 +865,12 @@ class HandoverApp:
         files = find_memos(self.batch_folder) if self.batch_folder.is_dir() else []
         if not files:
             self.batch_status.configure(text="선택한 폴더에 .txt 메모가 없습니다", fg="#B91C1C")
+            self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
             return
         skip = {r.memo_hash for r in load_records(self.out_dir)} if self.skip_var.get() else None
         self._batch_busy = True
         self._batch_total, self._batch_done, self._batch_failed = len(files), 0, []
+        self.progress_row.pack(fill="x", padx=20, pady=(0, 16))
         self.batch_button.configure(text="처리 중…")
         self.batch_button.set_enabled(False)
         self.batch_progress.configure(maximum=len(files), value=0)
@@ -771,6 +910,7 @@ class HandoverApp:
         self._counts = counts
         for key, label in self._tile_values.items():
             label.configure(text=str(counts[key]))
+        self._render_insights()
 
     def dashboard_rows(self) -> list[tuple]:
         return [(r.report.priority, r.source_name, r.report.summary, r.report.priority_reason,
@@ -794,7 +934,7 @@ class HandoverApp:
     # ---- 결과 처리 ---------------------------------------------------------------
     def _poll_loop(self):
         self.poll_results()
-        if self._busy or self._batch_busy:
+        if self._busy or self._batch_busy or self._insights_busy:
             self.root.after(100, self._poll_loop)
 
     def poll_results(self):
@@ -813,6 +953,8 @@ class HandoverApp:
                 self.batch_progress.configure(value=self._batch_done)
                 self.batch_status.configure(
                     text=f"{self._batch_done}/{self._batch_total} 처리 중 · 실패 {len(self._batch_failed)}건", fg=MUTED)
+            elif kind in ("insights_ok", "insights_error"):
+                self._finish_insights(kind, payload)
             elif kind == "batch_done":
                 self._finish_batch(payload)
             elif kind == "batch_error":
@@ -830,6 +972,7 @@ class HandoverApp:
             self.report_view.show_report(result.report, result.warnings, name, result.path, result.text)
             self.refresh_history()
             self.refresh_dashboard()
+            self.run_insights()  # 새 보고서가 추가됐으니 인사이트도 다시 분석
         else:
             self.report_view.show_state("empty")
             self.report_view.set_banner("error", f"보고서를 만들지 못했습니다 — {payload}",
@@ -850,6 +993,8 @@ class HandoverApp:
         self.batch_status.configure(text=text, fg="#B91C1C" if failed else "#047857")
         self.refresh_dashboard()
         self.refresh_history()
+        if done:
+            self.run_insights()  # 새 보고서가 생겼으면 공통점을 다시 분석
 
     # ---- 보고서 이력 --------------------------------------------------------------
     def refresh_history(self):
@@ -913,8 +1058,10 @@ def main():
         except (AttributeError, OSError):
             pass
     root = tk.Tk()
-    HandoverApp(root, client_factory=_make_client, out_dir=BASE_DIR / "reports",
+    app = HandoverApp(root, client_factory=_make_client, out_dir=BASE_DIR / "reports",
                 samples_dir=BASE_DIR / "참고", api_ready=bool(load_api_key(os.environ)))
+    if sys.platform == "win32":
+        root.state("zoomed")  # 대시보드를 넓게 보도록 최대화로 시작
     root.mainloop()
 
 
