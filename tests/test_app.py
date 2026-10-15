@@ -3,7 +3,7 @@ import tkinter as tk
 import pytest
 
 from conftest import SAMPLE_REPORT, FakeClient, make_report
-from handover.schema import Contact, Fact, TimelineEntry, Unconfirmed
+from handover.schema import Contact, Fact, Item, TimelineEntry, Unconfirmed
 from handover.insights import InsightPoint, Insights
 from handover.view import build_sections
 
@@ -33,6 +33,61 @@ def test_dashboard_chart_draws_one_bar_per_ranked_memo(root, tmp_path):
     app = make_app(root, tmp_path, FakeClient("end_turn", report))
     app.run_batch(); app.poll_results()
     assert app.chart_bars() == 2
+
+
+def three_priority_app(root, tmp_path):
+    write_memos(tmp_path, ["a", "b", "c"])
+    reports = [make_report(priority="긴급", category="설비 이상"),
+               make_report(priority="주의", category="수량 불일치"),
+               make_report(priority="주의", category="설비 이상",
+                           events=[Item(text="라벨 10장", source_quote="없는 문장")])]
+    app = make_app(root, tmp_path, FakeClient(results=[("end_turn", r) for r in reports]))
+    app.run_batch(); app.poll_results()
+    return app
+
+
+def test_tile_click_filters_table(root, tmp_path):
+    app = three_priority_app(root, tmp_path)
+    app.click_tile("주의")
+    assert [r[0] for r in app.dashboard_rows()] == ["주의", "주의"]
+    assert app.tile_counts()["전체"] == 3  # 타일 숫자는 필터와 상관없이 전체 기준
+    app.click_tile("경고")
+    assert len(app.dashboard_rows()) == 1 and app.dashboard_rows()[0][5] > 0
+    app.click_tile("경고")  # 같은 타일 다시 누르면 해제
+    assert len(app.dashboard_rows()) == 3
+    app.click_tile("긴급"); app.click_tile("전체")
+    assert len(app.dashboard_rows()) == 3
+
+
+def test_pie_slices_and_slice_filter(root, tmp_path):
+    app = three_priority_app(root, tmp_path)
+    assert app.pie_slices() == [("설비 이상", 2), ("수량 불일치", 1)]
+    app.filter_category("수량 불일치")
+    assert [r[1] for r in app.dashboard_rows()] == ["c.txt"] or len(app.dashboard_rows()) == 1
+    assert "수량 불일치" in app.filter_text()
+
+
+def test_unclassified_records_are_classified_before_insights(root, tmp_path):
+    import json
+    write_memos(tmp_path, ["a"])
+    app = make_app(root, tmp_path, FakeClient("end_turn", SAMPLE_REPORT))
+    app.run_batch(); app.poll_results()
+    path = next((tmp_path / "reports").glob("인수인계_*.json"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["report"]["category"]
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    from handover.classify import Classification, MemoCategory
+    fake = FakeClient("end_turn", SAMPLE_REPORT,
+                      classification=Classification(items=[MemoCategory(memo="a.txt", category="안전")]))
+    window = tk.Toplevel(root)
+    try:
+        again = make_app(window, tmp_path, fake)
+        assert again.pie_slices() == [("미분류", 1)]
+        again.run_insights(); again.poll_results()
+        assert len(fake.classify_calls) == 1
+        assert again.pie_slices() == [("안전", 1)]
+    finally:
+        window.destroy()
 
 
 def test_build_sections_detail_formats():

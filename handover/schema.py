@@ -9,6 +9,15 @@ from pydantic import BaseModel, Field
 Priority = Literal["긴급", "주의", "일반"]
 PRIORITY_ORDER: list[str] = ["긴급", "주의", "일반"]
 
+# 메모의 주된 문제 유형 (대시보드 원형 그래프용). '미분류'는 유형이 없던 이전 보고서에만 쓴다.
+CATEGORIES: list[str] = ["설비 이상", "수량 불일치", "품질·검사", "라벨·식별", "안전",
+                         "자재·물류", "서류·전산", "작업 지시·일정", "정상·기록"]
+UNCLASSIFIED = "미분류"
+ModelCategory = Literal["설비 이상", "수량 불일치", "품질·검사", "라벨·식별", "안전",
+                        "자재·물류", "서류·전산", "작업 지시·일정", "정상·기록"]
+Category = Literal["설비 이상", "수량 불일치", "품질·검사", "라벨·식별", "안전",
+                   "자재·물류", "서류·전산", "작업 지시·일정", "정상·기록", "미분류"]
+
 
 class Item(BaseModel):
     text: str = Field(description="보고서에 들어갈 한 줄. 메모에 적힌 내용만 쓴다")
@@ -51,5 +60,6 @@ class HandoverReport(BaseModel):
     unconfirmed: list[Unconfirmed] = Field(
         description="메모에서 확인되지 않았다고 했거나 기록이 없는 원인·수량·시각 등"
     )
+    category: Category = Field(description="메모의 주된 문제 유형 하나 ('미분류'는 쓰지 않는다)")
     priority_reason: str = Field(description="긴급도를 그렇게 판단한 메모 속 근거 한 문장")
     priority: Priority = Field(description="긴급 / 주의 / 일반")

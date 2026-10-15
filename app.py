@@ -16,12 +16,14 @@ from tkinter import filedialog, messagebox, ttk
 from handover.batch import find_memos, run_batch
 from handover.config import load_api_key
 from handover.files import read_memo_file
+from handover.classify import classify_missing
 from handover.insights import extract_insights, load_insights, save_insights
 from handover.llm import MODEL, ReportError
-from handover.schema import HandoverReport
+from handover.schema import PRIORITY_ORDER, UNCLASSIFIED, HandoverReport
 from handover.service import generate
 from handover.store import Record, load_records, sort_for_dashboard
-from handover.view import EMPTY, build_sections, unconfirmed_ranking
+from handover.view import (EMPTY, NOT_A_PROBLEM, OTHER, PIE_TYPES, build_sections, other_breakdown, pie_groups,
+                           unconfirmed_ranking)
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -380,7 +382,9 @@ class HandoverApp:
         self.api_ready = api_ready
         self.fonts = Fonts(root)
         self.history_paths: list[Path] = []
-        self._records: list[Record] = []
+        self._records: list[Record] = []      # 처리 현황 표에 보이는 건 (필터 적용)
+        self._all_records: list[Record] = []  # 전체 건
+        self._filter: tuple[str, str | None] | None = None
         self._results: queue.Queue = queue.Queue()
         self._busy = False
         self._batch_busy = False
@@ -668,6 +672,7 @@ class HandoverApp:
                       ("주의", PRIORITY_COLORS["주의"][0], "근무 중 확인 필요"),
                       ("일반", PRIORITY_COLORS["일반"][0], "마감·기록용"),
                       ("경고", "#B45309", "자동 점검 경고가 있는 건"), ("실패", "#B91C1C", "최근 일괄 처리 실패")]
+        self._tiles: dict[str, tuple[tk.Frame, str]] = {}
         for i, (key, color, hint) in enumerate(tile_specs):
             tiles.columnconfigure(i, weight=1, uniform="tiles")
             tile = Card(tiles)
@@ -678,13 +683,20 @@ class HandoverApp:
             value.pack(anchor="w", padx=16)
             tk.Label(tile, text=hint, bg=SURFACE, fg=FAINT, font=f.small).pack(anchor="w", padx=16, pady=(0, 8))
             self._tile_values[key] = value
+            self._tiles[key] = (tile, color)
+            if key != "실패":
+                for widget in (tile, *tile.winfo_children()):
+                    widget.bind("<Button-1>", lambda e, k=key: self.click_tile(k))
+                    widget.configure(cursor="hand2")
 
         row = tk.Frame(view, bg=BG)
         row.pack(fill="x", pady=(0, 12))
-        row.columnconfigure(0, weight=3, uniform="insrow")
-        row.columnconfigure(1, weight=2, uniform="insrow")
+        row.columnconfigure(0, weight=4, uniform="insrow")
+        row.columnconfigure(1, weight=3, uniform="insrow")
+        row.columnconfigure(2, weight=3, uniform="insrow")
         self._build_insights_card(row).grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        self._build_chart_card(row).grid(row=0, column=1, sticky="nsew")
+        self._build_pie_card(row).grid(row=0, column=1, sticky="nsew", padx=(0, 16))
+        self._build_chart_card(row).grid(row=0, column=2, sticky="nsew")
 
         main = tk.Frame(view, bg=BG)
         main.pack(fill="both", expand=True)
@@ -694,7 +706,11 @@ class HandoverApp:
 
         table = Card(main)
         table.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
-        card_header(table, f, "처리 현황", "긴급 → 주의 → 일반 순으로 정렬됩니다. 행을 선택하면 오른쪽에 상세 보고서가 열립니다")
+        _, table_actions = card_header(table, f, "처리 현황",
+                                       "긴급 → 주의 → 일반 순으로 정렬됩니다. 행을 선택하면 오른쪽에 상세 보고서가 열립니다")
+        self.filter_chip = tk.Label(table_actions, text="", bg=PRIMARY_SOFT, fg=PRIMARY, font=f.small_bold,
+                                    padx=10, pady=4, cursor="hand2")
+        self.filter_chip.bind("<Button-1>", lambda e: self.set_filter(None))
         box = tk.Frame(table, bg=SURFACE)
         box.pack(fill="both", expand=True, padx=12, pady=(0, 14))
         columns = ("priority", "memo", "summary", "unconfirmed", "warnings", "time")
@@ -751,6 +767,83 @@ class HandoverApp:
         self._chart_bar_count = 0
         return card
 
+    # ---- 원형 그래프: 문제 유형 비율 --------------------------------------------------
+    # dataviz 범주 팔레트 1~5번 (검증 통과), 기타는 중립 회색, 미분류는 더 옅은 회색. 색은 유형에 고정.
+    PIE_COLORS = {"설비 이상": "#2A78D6", "수량 불일치": "#EB6834", "품질·검사": "#1BAF7A",
+                  "안전": "#EDA100", "라벨·식별": "#E87BA4", OTHER: "#8A8A85", UNCLASSIFIED: "#C9C8C2"}
+
+    def _build_pie_card(self, parent) -> tk.Frame:
+        f = self.fonts
+        card = Card(parent)
+        tk.Label(card, text="문제 유형 비율", bg=SURFACE, fg=TEXT, font=f.title, anchor="w").pack(
+            fill="x", padx=20, pady=(14, 2))
+        tk.Label(card, text="Claude가 분류한 주된 문제 유형 · 조각이나 범례를 누르면 해당 유형만 봅니다",
+                 bg=SURFACE, fg=MUTED, font=f.small, anchor="w", justify="left", wraplength=360).pack(fill="x", padx=20)
+        body = tk.Frame(card, bg=SURFACE)
+        body.pack(fill="both", expand=True, padx=20, pady=(8, 14))
+        self.pie = tk.Canvas(body, bg=SURFACE, highlightthickness=0, width=170, height=170)
+        self.pie.pack(side="left", anchor="n")
+        self.pie_legend = tk.Frame(body, bg=SURFACE)
+        self.pie_legend.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.pie_note = tk.Label(card, text="", bg=SURFACE, fg=FAINT, font=f.small, anchor="w")
+        self.pie_note.pack(fill="x", padx=20, pady=(0, 10))
+        self._pie_slices: list[tuple[str, int]] = []
+        return card
+
+    def pie_slices(self) -> list[tuple[str, int]]:
+        return list(self._pie_slices)
+
+    def _draw_pie(self):
+        f = self.fonts
+        c = self.pie
+        c.delete("all")
+        for child in self.pie_legend.winfo_children():
+            child.destroy()
+        slices = pie_groups(self._all_records)
+        self._pie_slices = slices
+        normal = sum(1 for r in self._all_records if r.report.category == NOT_A_PROBLEM)
+        self.pie_note.configure(text=f"문제가 없는 정상·기록 {normal}건은 비율에서 제외" if normal else "")
+        total = sum(n for _, n in slices)
+        if not total:
+            c.create_text(85, 85, text="보고서 없음", fill=FAINT, font=f.small)
+            return
+        active = self._filter[1] if self._filter and self._filter[0] == "category" else None
+        start = 90.0
+        box = (6, 6, 164, 164)
+        for name, count in slices:
+            extent = -360.0 * count / total
+            tag = f"slice-{name}"
+            if count == total:  # 한 유형만 있으면 원 전체
+                c.create_oval(*box, fill=self.PIE_COLORS[name], outline=SURFACE, width=2, tags=tag)
+            else:
+                c.create_arc(*box, start=start, extent=extent, style="pieslice", fill=self.PIE_COLORS[name],
+                             outline=SURFACE, width=2, tags=tag)  # 2px 흰 틈으로 조각 구분
+            c.tag_bind(tag, "<Enter>", lambda e, n=name, k=count: self._pie_tooltip(e, n, k, total))
+            c.tag_bind(tag, "<Leave>", lambda e: self._chart_tooltip(None))
+            c.tag_bind(tag, "<Button-1>", lambda e, n=name: self.filter_category(n))
+            start += extent
+        c.configure(cursor="hand2")
+
+        # 범례: 색 + 유형 이름 + 건수 + 비율 (색만으로 구분하지 않도록 글자를 함께 표시)
+        for name, count in slices:
+            row = tk.Frame(self.pie_legend, bg=PRIMARY_SOFT if name == active else SURFACE, cursor="hand2")
+            row.pack(fill="x", pady=1)
+            tk.Frame(row, bg=self.PIE_COLORS[name], width=10, height=10).pack(side="left", padx=(4, 8), pady=6)
+            tk.Label(row, text=name, bg=row["bg"], fg=TEXT, font=f.small_bold if name == active else f.small,
+                     anchor="w").pack(side="left")
+            tk.Label(row, text=f"{count}건 · {count * 100 / total:.0f}%", bg=row["bg"], fg=MUTED,
+                     font=f.small).pack(side="right", padx=4)
+            for widget in (row, *row.winfo_children()):
+                widget.bind("<Button-1>", lambda e, n=name: self.filter_category(n))
+
+    def _pie_tooltip(self, event, name, count, total):
+        detail = ""
+        if name == OTHER:
+            detail = "\n" + ", ".join(f"{c} {n}건" for c, n in other_breakdown(self._all_records))
+        elif name == UNCLASSIFIED:
+            detail = "\n유형이 없던 이전 보고서 · ‘다시 분석’ 시 자동 분류"
+        self._show_tip(event, f"{name}\n{count}건 · 전체의 {count * 100 / total:.0f}%{detail}")
+
     def chart_bars(self) -> int:
         return self._chart_bar_count
 
@@ -758,21 +851,21 @@ class HandoverApp:
         c = self.chart
         c.delete("all")
         f = self.fonts
-        rows = unconfirmed_ranking(self._records, self.CHART_LIMIT)
+        rows = unconfirmed_ranking(self._all_records, self.CHART_LIMIT)
         self._chart_bar_count = len(rows)
         width = max(c.winfo_width(), 320)
         if not rows:
             c.create_text(width / 2, 60, text="미확인 항목이 있는 보고서가 없습니다", fill=FAINT, font=f.body)
             return
-        label_w, value_w = 150, 28
+        label_w, value_w = 160, 28
         bar_max = max(width - label_w - value_w - 8, 40)
         top = max(n for _, _, n in rows)
         for i, (name, priority, count) in enumerate(rows):
             y = 6 + i * self.CHART_ROW
             mid = y + self.CHART_ROW / 2 - 2
             label = Path(name).stem.replace("작업메모_", "")
-            if len(label) > 14:
-                label = label[:13] + "…"
+            if len(label) > 10:
+                label = label[:9] + "…"
             tag = f"bar{i}"
             c.create_text(0, mid, text=f"{priority} · {label}", anchor="w", fill=TEXT, font=f.small, tags=tag)
             x0 = label_w
@@ -790,23 +883,32 @@ class HandoverApp:
             c.tag_bind(tag, "<Button-1>", lambda e, n=name: self._select_by_name(n))
             c.configure(cursor="hand2")
 
-    def _chart_tooltip(self, event, name=None, priority=None, count=None):
+    def _show_tip(self, event, text: str | None):
         if self._chart_tip is not None:
             self._chart_tip.destroy()
             self._chart_tip = None
-        if event is None:
+        if event is None or not text:
             return
-        record = next((r for r in self._records if r.source_name == name), None)
-        summary = record.report.summary if record else ""
         tip = tk.Toplevel(self.root)
         tip.wm_overrideredirect(True)
         tip.configure(bg=HEADER)
-        tk.Label(tip, text=f"{name}\n긴급도 {priority} · 미확인 {count}건\n{summary}", bg=HEADER, fg="#FFFFFF",
-                 font=self.fonts.small, justify="left", wraplength=320, padx=10, pady=8).pack()
+        tk.Label(tip, text=text, bg=HEADER, fg="#FFFFFF", font=self.fonts.small, justify="left",
+                 wraplength=320, padx=10, pady=8).pack()
         tip.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 10}")
         self._chart_tip = tip
 
+    def _chart_tooltip(self, event, name=None, priority=None, count=None):
+        if event is None:
+            self._show_tip(None, None)
+            return
+        record = next((r for r in self._all_records if r.source_name == name), None)
+        summary = record.report.summary if record else ""
+        self._show_tip(event, f"{name}\n긴급도 {priority} · 미확인 {count}건\n{summary}")
+
     def _select_by_name(self, name: str):
+        if not any(r.source_name == name for r in self._records):
+            self._filter = None  # 필터에 걸러진 건이면 필터를 풀고 보여준다
+            self.refresh_dashboard()
         for i, record in enumerate(self._records):
             if record.source_name == name:
                 self.tree.see(str(i))
@@ -829,6 +931,8 @@ class HandoverApp:
         self.insights_meta.pack(side="left", padx=12)
         self.insights_body = tk.Frame(card, bg=SURFACE)
         self.insights_body.pack(fill="x", padx=20, pady=(0, 14))
+        self._insights_width = 0
+        card.bind("<Configure>", self._on_insights_resize)
         self._insight_labels: list[tk.Label] = []
         return card
 
@@ -844,7 +948,7 @@ class HandoverApp:
             child.destroy()
         self._insight_labels = []
         snap = self._insight_snapshot
-        stale = snap is not None and not snap.is_current(self._records)
+        stale = snap is not None and not snap.is_current(self._all_records)
         if snap:
             meta = f"보고서 {snap.source_count}건 기준 · {snap.created_at:%m/%d %H:%M} 분석"
             if stale:
@@ -865,7 +969,7 @@ class HandoverApp:
             return
 
         self._insight_label(self.insights_body, snap.insights.headline, fg=TEXT, font=f.hero,
-                            wraplength=760).pack(fill="x", pady=(0, 10))
+                            wraplength=max(self._insights_width - 50, 300)).pack(fill="x", pady=(0, 10))
         cols = tk.Frame(self.insights_body, bg=SURFACE)
         cols.pack(fill="x")
         for i, (key, title, color) in enumerate(self.INSIGHT_COLUMNS):
@@ -882,17 +986,22 @@ class HandoverApp:
                 self._insight_label(col, "해당 없음", fg=FAINT, font=f.small).pack(fill="x", padx=12, pady=(0, 10))
             for point in shown:
                 self._insight_label(col, f"• {point.title}", fg=color, font=f.small_bold,
-                                    wraplength=220).pack(fill="x", padx=12, pady=(4, 0))
+                                    wraplength=max((self._insights_width - 90) // 3 - 24, 140)).pack(fill="x", padx=12, pady=(4, 0))
                 if not self._insights_expanded:
                     continue
-                self._insight_label(col, point.detail, fg=TEXT, font=f.small, wraplength=220).pack(fill="x", padx=12)
+                self._insight_label(col, point.detail, fg=TEXT, font=f.small, wraplength=max((self._insights_width - 90) // 3 - 24, 140)).pack(fill="x", padx=12)
                 if point.related:
                     related = ", ".join(Path(n).stem.replace("작업메모_", "") for n in point.related)
                     self._insight_label(col, f"관련: {related}", fg=FAINT, font=f.small,
-                                        wraplength=220).pack(fill="x", padx=12)
+                                        wraplength=max((self._insights_width - 90) // 3 - 24, 140)).pack(fill="x", padx=12)
             if len(points) > len(shown):
                 self._insight_label(col, f"외 {len(points) - len(shown)}건", fg=FAINT, font=f.small).pack(fill="x", padx=12)
             tk.Frame(col, bg=SUBTLE, height=8).pack(fill="x")
+
+    def _on_insights_resize(self, event):
+        if abs(event.width - self._insights_width) > 8:  # 폭이 실제로 바뀔 때만 다시 그림
+            self._insights_width = event.width
+            self._render_insights()
 
     def _toggle_insights(self):
         self._insights_expanded = not self._insights_expanded
@@ -918,7 +1027,9 @@ class HandoverApp:
 
         def job():
             try:
-                insights = extract_insights(records, self._get_client())
+                client = self._get_client()
+                classify_missing(records, client)  # 유형이 없던 이전 보고서를 먼저 분류 (API 1회)
+                insights = extract_insights(records, client)
                 save_insights(self.out_dir, insights, records, datetime.now())
                 self._results.put(("insights_ok", None))
             except ReportError as e:
@@ -935,6 +1046,8 @@ class HandoverApp:
         if kind == "insights_ok":
             self._insight_snapshot = load_insights(self.out_dir)
             self._insight_message = None
+            self.refresh_dashboard()  # 분류 결과(원형 그래프)도 반영
+            return
         else:
             self._insight_message = ("error", f"인사이트를 분석하지 못했습니다 — {payload}")
         self._render_insights()
@@ -986,8 +1099,60 @@ class HandoverApp:
         self.runner(job)
         self.root.after(100, self._poll_loop)
 
+    # ---- 필터 (타일·원형 그래프 클릭) ------------------------------------------------
+    def _matches(self, record: Record) -> bool:
+        if self._filter is None:
+            return True
+        kind, value = self._filter
+        if kind == "priority":
+            return record.report.priority == value
+        if kind == "warnings":
+            return bool(record.warnings)
+        if kind == "category":
+            group = record.report.category
+            if value == OTHER:
+                return group not in PIE_TYPES and group not in (UNCLASSIFIED, NOT_A_PROBLEM)
+            return group == value
+        return True
+
+    def set_filter(self, new_filter):
+        self._filter = None if new_filter == self._filter else new_filter
+        self.refresh_dashboard()
+
+    def click_tile(self, key: str):
+        if key == "전체":
+            self._filter = None
+            self.refresh_dashboard()
+        elif key == "경고":
+            self.set_filter(("warnings", None))
+        elif key in PRIORITY_ORDER:
+            self.set_filter(("priority", key))
+
+    def filter_category(self, category: str):
+        self.set_filter(("category", category))
+
+    def filter_text(self) -> str:
+        return self.filter_chip.cget("text") if self._filter else ""
+
+    def _update_filter_ui(self):
+        active_tile = None
+        if self._filter:
+            kind, value = self._filter
+            label = {"priority": value, "warnings": "자동 점검 경고", "category": f"유형 · {value}"}[kind]
+            self.filter_chip.configure(text=f"필터: {label} · {len(self._records)}건   ✕ 해제")
+            self.filter_chip.pack(side="right")
+            active_tile = value if kind == "priority" else ("경고" if kind == "warnings" else None)
+        else:
+            self.filter_chip.pack_forget()
+        for key, (tile, color) in self._tiles.items():
+            active = key == active_tile or (key == "전체" and self._filter is None)
+            tile.configure(highlightthickness=2 if active else 1,
+                           highlightbackground=color if active else BORDER)
+
     def refresh_dashboard(self):
-        self._records = sort_for_dashboard(load_records(self.out_dir))
+        self._all_records = sort_for_dashboard(load_records(self.out_dir))
+        self._records = [r for r in self._all_records if self._matches(r)]
+        self._update_filter_ui()
         self.tree.delete(*self.tree.get_children())
         for i, r in enumerate(self._records):
             self.tree.insert("", "end", iid=str(i), tags=(r.report.priority,), values=(
@@ -996,15 +1161,19 @@ class HandoverApp:
         if self._records:
             self.dashboard_empty.place_forget()
         else:
+            self.dashboard_empty.configure(text="조건에 맞는 보고서가 없습니다." if self._all_records else
+                                           "아직 처리한 메모가 없습니다.\n‘전체 처리’를 눌러 폴더의 메모를 한 번에 정리하세요.")
             self.dashboard_empty.place(relx=0.5, rely=0.4, anchor="center")
-        counts = {"전체": len(self._records), "긴급": 0, "주의": 0, "일반": 0,
-                  "경고": sum(1 for r in self._records if r.warnings), "실패": len(self._batch_failed)}
-        for r in self._records:
+        everything = self._all_records  # 타일·차트·인사이트는 필터와 상관없이 전체 기준
+        counts = {"전체": len(everything), "긴급": 0, "주의": 0, "일반": 0,
+                  "경고": sum(1 for r in everything if r.warnings), "실패": len(self._batch_failed)}
+        for r in everything:
             counts[r.report.priority] += 1
         self._counts = counts
         for key, label in self._tile_values.items():
             label.configure(text=str(counts[key]))
         self._render_insights()
+        self._draw_pie()
         self._draw_chart()
 
     def dashboard_rows(self) -> list[tuple]:

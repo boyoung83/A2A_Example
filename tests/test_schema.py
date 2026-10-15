@@ -21,7 +21,7 @@ def test_report_roundtrip():
 def test_field_order_puts_judgement_last():
     assert list(HandoverReport.model_fields) == [
         "summary", "events", "actions", "current_status", "next_checks",
-        "timeline", "key_facts", "contacts", "unconfirmed", "priority_reason", "priority"]
+        "timeline", "key_facts", "contacts", "unconfirmed", "category", "priority_reason", "priority"]
 
 
 def test_priority_values_restricted():

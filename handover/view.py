@@ -17,6 +17,37 @@ def _texts(items: list[Item]) -> list[str]:
     return [item.text for item in items] or [EMPTY]
 
 
+OTHER = "기타"
+# 원형 그래프에서 고정 색을 갖는 유형 (색은 순위가 아니라 유형을 따라간다). 나머지는 '기타'로 묶는다.
+PIE_TYPES = ["설비 이상", "수량 불일치", "품질·검사", "안전", "라벨·식별"]
+NOT_A_PROBLEM = "정상·기록"  # '문제 유형' 비율에서는 뺀다
+
+
+def pie_groups(records) -> list[tuple[str, int]]:
+    """원형 그래프 조각: 고정 유형(정해진 순서) → 기타 → 미분류. 0건인 조각과 정상·기록은 뺀다."""
+    from handover.schema import UNCLASSIFIED
+    counts: dict[str, int] = {}
+    for r in records:
+        c = r.report.category
+        if c == NOT_A_PROBLEM:
+            continue
+        key = c if c in PIE_TYPES or c == UNCLASSIFIED else OTHER
+        counts[key] = counts.get(key, 0) + 1
+    order = PIE_TYPES + [OTHER, UNCLASSIFIED]
+    return [(key, counts[key]) for key in order if counts.get(key)]
+
+
+def other_breakdown(records) -> list[tuple[str, int]]:
+    """'기타'에 묶인 유형별 건수 (많은 순)."""
+    from handover.schema import UNCLASSIFIED
+    counts: dict[str, int] = {}
+    for r in records:
+        c = r.report.category
+        if c not in PIE_TYPES and c not in (UNCLASSIFIED, NOT_A_PROBLEM):
+            counts[c] = counts.get(c, 0) + 1
+    return sorted(counts.items(), key=lambda kv: -kv[1])
+
+
 def unconfirmed_ranking(records, limit: int = 8) -> list[tuple[str, str, int]]:
     """미확인 항목이 많은 메모 순 (같으면 긴급도 순). 미확인이 없는 메모는 뺀다."""
     from handover.schema import PRIORITY_ORDER

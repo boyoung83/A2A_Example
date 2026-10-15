@@ -7,7 +7,7 @@ from handover.schema import HandoverReport, Item
 def make_report(**kw) -> HandoverReport:
     fields = dict(summary="", events=[], actions=[], current_status=[], next_checks=[],
                   timeline=[], key_facts=[], contacts=[], unconfirmed=[],
-                  priority_reason="", priority="일반")
+                  priority_reason="", priority="일반", category="정상·기록")
     fields.update(kw)
     return HandoverReport(**fields)
 
@@ -29,9 +29,12 @@ class FakeClient:
     인사이트 응답은 insights 인자로 정하고, 없으면 단일 응답이 Insights일 때 그것을, 아니면 빈 인사이트를 준다.
     """
 
-    def __init__(self, stop_reason=None, parsed=None, results=None, error=None, insights=None):
+    def __init__(self, stop_reason=None, parsed=None, results=None, error=None, insights=None,
+                 classification=None):
         self.calls = []
         self.insight_calls = []
+        self.classify_calls = []
+        self._classification = classification
         self._error = error
         self._results = list(results) if results is not None else None
         self._single = (stop_reason, parsed)
@@ -39,6 +42,11 @@ class FakeClient:
         self.beta = SimpleNamespace(messages=SimpleNamespace(parse=self._parse))
 
     def _parse(self, **kw):
+        from handover.classify import Classification
+        if kw.get("output_format") is Classification:
+            self.classify_calls.append(kw)
+            result = self._classification or Classification(items=[])
+            return SimpleNamespace(stop_reason="end_turn", parsed_output=result)
         if kw.get("output_format") is Insights:
             self.insight_calls.append(kw)
             if self._error is not None:

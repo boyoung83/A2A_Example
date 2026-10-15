@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pydantic
 
-from handover.schema import PRIORITY_ORDER, HandoverReport
+from handover.schema import PRIORITY_ORDER, UNCLASSIFIED, HandoverReport
 
 
 @dataclass
@@ -43,6 +43,7 @@ def save_record(record: Record) -> Path:
 def _load(path: Path) -> Record | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        data["report"].setdefault("category", UNCLASSIFIED)  # 문제 유형이 생기기 전에 만든 보고서
         return Record(
             source_name=data["source_name"],
             created_at=datetime.fromisoformat(data["created_at"]),
