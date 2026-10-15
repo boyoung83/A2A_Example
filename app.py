@@ -21,7 +21,7 @@ from handover.llm import MODEL, ReportError
 from handover.schema import HandoverReport
 from handover.service import generate
 from handover.store import Record, load_records, sort_for_dashboard
-from handover.view import EMPTY, build_sections
+from handover.view import EMPTY, build_sections, unconfirmed_ranking
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -679,7 +679,12 @@ class HandoverApp:
             tk.Label(tile, text=hint, bg=SURFACE, fg=FAINT, font=f.small).pack(anchor="w", padx=16, pady=(0, 8))
             self._tile_values[key] = value
 
-        self._build_insights_card(view)
+        row = tk.Frame(view, bg=BG)
+        row.pack(fill="x", pady=(0, 12))
+        row.columnconfigure(0, weight=3, uniform="insrow")
+        row.columnconfigure(1, weight=2, uniform="insrow")
+        self._build_insights_card(row).grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        self._build_chart_card(row).grid(row=0, column=1, sticky="nsew")
 
         main = tk.Frame(view, bg=BG)
         main.pack(fill="both", expand=True)
@@ -719,10 +724,98 @@ class HandoverApp:
     INSIGHT_COLUMNS = (("patterns", "공통 패턴", "#2563EB"), ("risks", "주의할 경향", "#DC2626"),
                        ("gaps", "기록 보완점", "#D97706"))
 
-    def _build_insights_card(self, parent):
+    # ---- 차트: 미확인 항목이 많은 메모 ------------------------------------------------
+    CHART_LIMIT = 8
+    CHART_ROW = 30
+    # 긴급도는 '상태'이므로 dataviz 상태 팔레트(critical/serious/good)를 쓰고, 항상 글자 라벨과 함께 표시한다.
+    STATUS_COLORS = {"긴급": "#D03B3B", "주의": "#EC835A", "일반": "#0CA30C"}
+
+    def _build_chart_card(self, parent) -> tk.Frame:
         f = self.fonts
         card = Card(parent)
-        card.pack(fill="x", pady=(0, 12))
+        head = tk.Frame(card, bg=SURFACE)
+        head.pack(fill="x", padx=20, pady=(14, 2))
+        tk.Label(head, text="미확인 항목이 많은 메모", bg=SURFACE, fg=TEXT, font=f.title).pack(side="left")
+        legend = tk.Frame(head, bg=SURFACE)
+        legend.pack(side="right")
+        for name, color in self.STATUS_COLORS.items():
+            tk.Frame(legend, bg=color, width=10, height=10).pack(side="left", padx=(10, 4))
+            tk.Label(legend, text=name, bg=SURFACE, fg=MUTED, font=f.small).pack(side="left")
+        tk.Label(card, text=f"다음 근무자가 직접 확인할 것이 많은 순 · 상위 {self.CHART_LIMIT}건 · 막대를 누르면 상세 보고서",
+                 bg=SURFACE, fg=MUTED, font=f.small, anchor="w").pack(fill="x", padx=20)
+        self.chart = tk.Canvas(card, bg=SURFACE, highlightthickness=0,
+                               height=self.CHART_LIMIT * self.CHART_ROW + 12)
+        self.chart.pack(fill="both", expand=True, padx=20, pady=(8, 14))
+        self.chart.bind("<Configure>", lambda e: self._draw_chart())
+        self._chart_tip = None
+        self._chart_bar_count = 0
+        return card
+
+    def chart_bars(self) -> int:
+        return self._chart_bar_count
+
+    def _draw_chart(self):
+        c = self.chart
+        c.delete("all")
+        f = self.fonts
+        rows = unconfirmed_ranking(self._records, self.CHART_LIMIT)
+        self._chart_bar_count = len(rows)
+        width = max(c.winfo_width(), 320)
+        if not rows:
+            c.create_text(width / 2, 60, text="미확인 항목이 있는 보고서가 없습니다", fill=FAINT, font=f.body)
+            return
+        label_w, value_w = 150, 28
+        bar_max = max(width - label_w - value_w - 8, 40)
+        top = max(n for _, _, n in rows)
+        for i, (name, priority, count) in enumerate(rows):
+            y = 6 + i * self.CHART_ROW
+            mid = y + self.CHART_ROW / 2 - 2
+            label = Path(name).stem.replace("작업메모_", "")
+            if len(label) > 14:
+                label = label[:13] + "…"
+            tag = f"bar{i}"
+            c.create_text(0, mid, text=f"{priority} · {label}", anchor="w", fill=TEXT, font=f.small, tags=tag)
+            x0 = label_w
+            x1 = x0 + max(bar_max * count / top, 6)
+            color = self.STATUS_COLORS[priority]
+            # 얇은 막대(12px), 끝만 둥글게: 사각형 + 끝 원
+            c.create_rectangle(x0, mid - 6, x1 - 6, mid + 6, fill=color, outline="", tags=tag)
+            c.create_oval(x1 - 12, mid - 6, x1, mid + 6, fill=color, outline="", tags=tag)
+            c.create_text(x1 + 6, mid, text=str(count), anchor="w", fill=MUTED, font=f.small_bold, tags=tag)
+            # 마우스 영역은 막대보다 넓게 (행 전체)
+            hit = c.create_rectangle(0, y, width, y + self.CHART_ROW, fill="", outline="", tags=tag)
+            c.tag_lower(hit)
+            c.tag_bind(tag, "<Enter>", lambda e, n=name, p=priority, k=count: self._chart_tooltip(e, n, p, k))
+            c.tag_bind(tag, "<Leave>", lambda e: self._chart_tooltip(None))
+            c.tag_bind(tag, "<Button-1>", lambda e, n=name: self._select_by_name(n))
+            c.configure(cursor="hand2")
+
+    def _chart_tooltip(self, event, name=None, priority=None, count=None):
+        if self._chart_tip is not None:
+            self._chart_tip.destroy()
+            self._chart_tip = None
+        if event is None:
+            return
+        record = next((r for r in self._records if r.source_name == name), None)
+        summary = record.report.summary if record else ""
+        tip = tk.Toplevel(self.root)
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=HEADER)
+        tk.Label(tip, text=f"{name}\n긴급도 {priority} · 미확인 {count}건\n{summary}", bg=HEADER, fg="#FFFFFF",
+                 font=self.fonts.small, justify="left", wraplength=320, padx=10, pady=8).pack()
+        tip.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 10}")
+        self._chart_tip = tip
+
+    def _select_by_name(self, name: str):
+        for i, record in enumerate(self._records):
+            if record.source_name == name:
+                self.tree.see(str(i))
+                self.select_dashboard_row(i)
+                return
+
+    def _build_insights_card(self, parent) -> tk.Frame:
+        f = self.fonts
+        card = Card(parent)
         top = tk.Frame(card, bg=SURFACE)
         top.pack(fill="x", padx=20, pady=(14, 6))
         self.insights_button = Button(top, "다시 분석", self.run_insights, font=f.body)
@@ -737,6 +830,7 @@ class HandoverApp:
         self.insights_body = tk.Frame(card, bg=SURFACE)
         self.insights_body.pack(fill="x", padx=20, pady=(0, 14))
         self._insight_labels: list[tk.Label] = []
+        return card
 
     def _insight_label(self, parent, text, **kw) -> tk.Label:
         kw.setdefault("bg", parent["bg"])
@@ -771,7 +865,7 @@ class HandoverApp:
             return
 
         self._insight_label(self.insights_body, snap.insights.headline, fg=TEXT, font=f.hero,
-                            wraplength=1100).pack(fill="x", pady=(0, 10))
+                            wraplength=760).pack(fill="x", pady=(0, 10))
         cols = tk.Frame(self.insights_body, bg=SURFACE)
         cols.pack(fill="x")
         for i, (key, title, color) in enumerate(self.INSIGHT_COLUMNS):
@@ -788,14 +882,14 @@ class HandoverApp:
                 self._insight_label(col, "해당 없음", fg=FAINT, font=f.small).pack(fill="x", padx=12, pady=(0, 10))
             for point in shown:
                 self._insight_label(col, f"• {point.title}", fg=color, font=f.small_bold,
-                                    wraplength=330).pack(fill="x", padx=12, pady=(4, 0))
+                                    wraplength=220).pack(fill="x", padx=12, pady=(4, 0))
                 if not self._insights_expanded:
                     continue
-                self._insight_label(col, point.detail, fg=TEXT, font=f.small, wraplength=330).pack(fill="x", padx=12)
+                self._insight_label(col, point.detail, fg=TEXT, font=f.small, wraplength=220).pack(fill="x", padx=12)
                 if point.related:
                     related = ", ".join(Path(n).stem.replace("작업메모_", "") for n in point.related)
                     self._insight_label(col, f"관련: {related}", fg=FAINT, font=f.small,
-                                        wraplength=330).pack(fill="x", padx=12)
+                                        wraplength=220).pack(fill="x", padx=12)
             if len(points) > len(shown):
                 self._insight_label(col, f"외 {len(points) - len(shown)}건", fg=FAINT, font=f.small).pack(fill="x", padx=12)
             tk.Frame(col, bg=SUBTLE, height=8).pack(fill="x")
@@ -911,6 +1005,7 @@ class HandoverApp:
         for key, label in self._tile_values.items():
             label.configure(text=str(counts[key]))
         self._render_insights()
+        self._draw_chart()
 
     def dashboard_rows(self) -> list[tuple]:
         return [(r.report.priority, r.source_name, r.report.summary, r.report.priority_reason,

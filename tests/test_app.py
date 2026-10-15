@@ -19,6 +19,22 @@ def test_build_sections_order_and_placeholders():
     assert sections[7].kind == "unconfirmed"
 
 
+def test_unconfirmed_ranking_orders_and_limits():
+    from handover.view import unconfirmed_ranking
+    u = lambda n: [Unconfirmed(subject=f"s{i}", note="") for i in range(n)]
+    records = [type("R", (), {"source_name": name, "report": make_report(priority=p, unconfirmed=u(n))})()
+               for name, p, n in [("a", "일반", 3), ("b", "긴급", 3), ("c", "주의", 5), ("d", "긴급", 0), ("e", "주의", 1)]]
+    assert unconfirmed_ranking(records, limit=3) == [("c", "주의", 5), ("b", "긴급", 3), ("a", "일반", 3)]
+
+
+def test_dashboard_chart_draws_one_bar_per_ranked_memo(root, tmp_path):
+    write_memos(tmp_path, ["a", "b"])
+    report = make_report(priority="긴급", unconfirmed=[Unconfirmed(subject="원인", note="")])
+    app = make_app(root, tmp_path, FakeClient("end_turn", report))
+    app.run_batch(); app.poll_results()
+    assert app.chart_bars() == 2
+
+
 def test_build_sections_detail_formats():
     r = make_report(
         timeline=[TimelineEntry(time="14:10", text="진동 발생", source_quote="q")],

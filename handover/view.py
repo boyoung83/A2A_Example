@@ -17,6 +17,15 @@ def _texts(items: list[Item]) -> list[str]:
     return [item.text for item in items] or [EMPTY]
 
 
+def unconfirmed_ranking(records, limit: int = 8) -> list[tuple[str, str, int]]:
+    """미확인 항목이 많은 메모 순 (같으면 긴급도 순). 미확인이 없는 메모는 뺀다."""
+    from handover.schema import PRIORITY_ORDER
+    rows = [(r.source_name, r.report.priority, len(r.report.unconfirmed)) for r in records]
+    rows = [row for row in rows if row[2] > 0]
+    rows.sort(key=lambda row: (-row[2], PRIORITY_ORDER.index(row[1])))
+    return rows[:limit]
+
+
 def build_sections(report: HandoverReport) -> list[Section]:
     timeline = [f"{t.time}  {t.text}" for t in report.timeline]
     facts = [f"{f.label}: {f.value}" for f in report.key_facts]
